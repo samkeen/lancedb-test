@@ -1,0 +1,15 @@
+[package]
+name = "lancedb-test"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+vectordb = "0.4.10"
+tokio = "1.36.0"
+futures = "0.3.30"
+arrow-array = "50.0.0"
+arrow-schema = "50.0.0"
+fastembed = "3.1.1"
+anyhow = "1.0.79"

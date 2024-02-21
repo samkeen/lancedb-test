@@ -1,0 +1,7 @@
+/target
+
+/.fastembed_cache/
+/.idea/
+/.vscode/
+
+/data/
