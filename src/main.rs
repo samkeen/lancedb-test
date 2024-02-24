@@ -39,13 +39,19 @@ async fn main() -> Result<()> {
         tbl.count_rows(None).await?
     );
     create_index(tbl.as_ref()).await?;
-    let batches = search(tbl.as_ref()).await?;
-    println!("Batches> {:?}", batches);
+    let search_result = search(tbl.as_ref()).await?;
+    // @TODO for each result, lookup the text for the returned embeddings
+    for batch in &search_result {
+        println!("Number of 'records'> {}", batch.num_columns());
+        println!("Number of 'dimensions' in records> {}", batch.num_rows());
+        for column in batch.columns() {
+            println!("Record> {:?}", column);
+        }
+    }
+    // println!("Batches> {:?}", search_result);
 
     create_empty_table(db.clone()).await.unwrap();
-
     tbl.delete("id > 24").await.unwrap();
-
     db.drop_table("my_table").await.unwrap();
     Ok(())
 }
@@ -178,9 +184,26 @@ async fn create_index(table: &dyn Table) -> Result<()> {
 // @TODO getting this error: Error: Store { message: "No vector column found to create index" }
 // @TODO fix this: instead of [1.0; 128], use the embedding of one of the lines from the document
 async fn search(table: &dyn Table) -> Result<Vec<RecordBatch>> {
-    println!("Searching for vectors similar to [1.0; 128]...");
+    let query = match create_embeddings(vec![
+        "Call me Ishmael. Some years ago—never mind how long precisely—having".to_string(),
+    ]) {
+        Ok(embeddings) => {
+            println!("Embeddings length: {}", embeddings.len()); // -> Embeddings length: 4
+            println!("Embedding dimension: {}", embeddings[0].len()); // -> Embedding dimension: 384
+                                                                      // println!("Embedding: {:?}", embeddings[0]); // -> Embedding: [0.1, 0.2, 0.3, ...]
+            embeddings
+        }
+        Err(e) => {
+            panic!("Error: {:?}", e);
+        }
+    };
+    // @TODO: I bet I can do something better than this
+    let query: Vec<f32> = query
+        .into_iter()
+        .flat_map(|embedding| embedding.to_vec())
+        .collect();
     Ok(table
-        .search(&[1.0; 128])
+        .search(&query)
         .limit(2)
         .execute_stream()
         .await?
