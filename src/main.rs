@@ -4,7 +4,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow_array::types::Float32Type;
-use arrow_array::{FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator};
+use arrow_array::{
+    ArrayRef, FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator, StringArray,
+};
 use arrow_schema::{DataType, Field, Schema};
 use fastembed::{Embedding, EmbeddingModel, InitOptions, TextEmbedding};
 use futures::TryStreamExt;
@@ -15,15 +17,12 @@ use vectordb::{connect, Result, Table, TableRef};
 #[tokio::main]
 async fn main() -> Result<()> {
     let db = init_db().await?;
-
-    // into a Vec<&str>, remoing empty lines
     let documents = read_file_and_split_lines("tests/fixtures/mobi-dick.txt").unwrap();
 
     let embeddings = match create_embeddings(documents[0..1000].to_vec()) {
         Ok(embeddings) => {
-            println!("Embeddings length: {}", embeddings.len()); // -> Embeddings length: 4
-            println!("Embedding dimension: {}", embeddings[0].len()); // -> Embedding dimension: 384
-                                                                      // println!("Embedding: {:?}", embeddings[0]); // -> Embedding: [0.1, 0.2, 0.3, ...]
+            println!("Embeddings length: {}", embeddings.len());
+            println!("Embedding dimension: {}", embeddings[0].len());
             embeddings
         }
         Err(e) => {
@@ -32,8 +31,7 @@ async fn main() -> Result<()> {
     };
 
     println!("Initial table names> {:?}", db.table_names().await?);
-    let _records = vec![vec![1.0f32; 128]; 1000];
-    let tbl = create_table(db.clone(), embeddings).await?;
+    let tbl = create_table(db.clone(), embeddings, documents[0..1000].to_vec()).await?;
     println!(
         "Number of records in the table> {}",
         tbl.count_rows(None).await?
@@ -80,22 +78,31 @@ async fn open_with_existing_tbl() -> Result<()> {
     Ok(())
 }
 
-async fn create_table(db: Arc<dyn Connection>, records: Vec<Vec<f32>>) -> Result<TableRef> {
-    let dimensions_count = records[0].len();
-
+async fn create_table(
+    db: Arc<dyn Connection>,
+    embeddings: Vec<Vec<f32>>,
+    text: Vec<String>,
+) -> Result<TableRef> {
+    assert_eq!(
+        embeddings.len(),
+        text.len(),
+        "Embeddings and text must be the same length"
+    );
+    let dimensions_count = embeddings[0].len();
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int32, false),
         Field::new(
-            "vector",
+            "embeddings",
             DataType::FixedSizeList(
                 Arc::new(Field::new("item", DataType::Float32, true)),
                 dimensions_count as i32,
             ),
             true,
         ),
+        Field::new("text", DataType::Utf8, false),
     ]));
 
-    let records_iter = create_record_batch(records, schema.clone())
+    let records_iter = create_record_batch(embeddings, text, schema.clone())
         .into_iter()
         .map(Ok);
     let batches = RecordBatchIterator::new(records_iter, schema.clone());
@@ -141,10 +148,14 @@ fn wrap_in_option<T>(source: Vec<Vec<T>>) -> Vec<Option<Vec<Option<T>>>> {
         .collect()
 }
 
-fn create_record_batch(source: Vec<Vec<f32>>, schema: Arc<Schema>) -> Vec<RecordBatch> {
-    let total_records_count = source.len();
-    let dimensions_count = source[0].len();
-    let wrapped_source = wrap_in_option(source);
+fn create_record_batch(
+    embeddings: Vec<Vec<f32>>,
+    text: Vec<String>,
+    schema: Arc<Schema>,
+) -> Vec<RecordBatch> {
+    let total_records_count = embeddings.len();
+    let dimensions_count = embeddings[0].len();
+    let wrapped_source = wrap_in_option(embeddings);
     vec![RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -157,9 +168,11 @@ fn create_record_batch(source: Vec<Vec<f32>>, schema: Arc<Schema>) -> Vec<Record
                     dimensions_count as i32,
                 ),
             ),
+            // This is the text field
+            Arc::new(Arc::new(StringArray::from(text)) as ArrayRef),
         ],
     )
-    .unwrap()]
+        .unwrap()]
 }
 
 async fn create_empty_table(db: Arc<dyn Connection>) -> Result<TableRef> {
@@ -174,15 +187,13 @@ async fn create_empty_table(db: Arc<dyn Connection>) -> Result<TableRef> {
 
 async fn create_index(table: &dyn Table) -> Result<()> {
     table
-        .create_index(&["vector"])
+        .create_index(&["embeddings"])
         .ivf_pq()
         .num_partitions(8)
         .build()
         .await
 }
 
-// @TODO getting this error: Error: Store { message: "No vector column found to create index" }
-// @TODO fix this: instead of [1.0; 128], use the embedding of one of the lines from the document
 async fn search(table: &dyn Table) -> Result<Vec<RecordBatch>> {
     let query = match create_embeddings(vec![
         "Call me Ishmael. Some years ago—never mind how long precisely—having".to_string(),
@@ -190,7 +201,7 @@ async fn search(table: &dyn Table) -> Result<Vec<RecordBatch>> {
         Ok(embeddings) => {
             println!("Embeddings length: {}", embeddings.len()); // -> Embeddings length: 4
             println!("Embedding dimension: {}", embeddings[0].len()); // -> Embedding dimension: 384
-                                                                      // println!("Embedding: {:?}", embeddings[0]); // -> Embedding: [0.1, 0.2, 0.3, ...]
+            // println!("Embedding: {:?}", embeddings[0]); // -> Embedding: [0.1, 0.2, 0.3, ...]
             embeddings
         }
         Err(e) => {
@@ -212,8 +223,8 @@ async fn search(table: &dyn Table) -> Result<Vec<RecordBatch>> {
 }
 
 fn read_file_and_split_lines<P>(filename: P) -> io::Result<Vec<String>>
-where
-    P: AsRef<Path>,
+    where
+        P: AsRef<Path>,
 {
     let file = File::open(filename)?;
     let reader = BufReader::new(file);
