@@ -10,6 +10,7 @@ use arrow_schema::{DataType, Field, Schema};
 use fastembed::{Embedding, EmbeddingModel, InitOptions, TextEmbedding};
 use futures::TryStreamExt;
 
+use vectordb::index::MetricType;
 use vectordb::Connection;
 use vectordb::{connect, Table, TableRef};
 
@@ -271,6 +272,7 @@ async fn search(table: &dyn Table, search_text: &str) -> vectordb::Result<Vec<Re
         .collect();
     Ok(table
         .search(&query)
+        .metric_type(MetricType::L2) // this is the default
         .limit(2)
         .execute_stream()
         .await?
