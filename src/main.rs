@@ -1,7 +1,6 @@
-use std::fs::File;
-use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
+use std::{fs, io};
 
 use arrow_array::types::Float32Type;
 use arrow_array::{
@@ -12,7 +11,7 @@ use fastembed::{Embedding, EmbeddingModel, InitOptions, TextEmbedding};
 use futures::TryStreamExt;
 
 use vectordb::Connection;
-use vectordb::{connect, Result, Table, TableRef};
+use vectordb::{connect, Table, TableRef};
 
 /// This is a simple exampled that demonstrates how to use LanceDB to store embeddings and then
 /// search against those embeddings.
@@ -31,16 +30,25 @@ use vectordb::{connect, Result, Table, TableRef};
 ///
 /// With the db populated, we then run a similarity search for a given of text and print the results.
 /// ```
+/// Searching for string: 'Call me Ishmael. Some years ago—never mind how long precisely—having'
+/// Num records embedded: 1
+/// Embedding dimension: 384
+/// Number of 'records'> 4
 /// Search results[count: 2]:
 /// IDs> PrimitiveArray<Int32>
 /// [
-///   8,
-///   239,
+///   4,
+///   216,
 /// ]
 /// Text> StringArray
 /// [
 ///   "Call me Ishmael. Some years ago—never mind how long precisely—having",
 ///   "wherever you go, Ishmael, said I to myself, as I stood in the middle of",
+/// ]
+/// Similarity distances> PrimitiveArray<Float32>
+/// [
+///   0.09064292,
+///   0.20795542,
 /// ]
 /// Embeddings> FixedSizeListArray<384>
 /// [
@@ -49,6 +57,10 @@ use vectordb::{connect, Result, Table, TableRef};
 ///   -0.0030241862,
 ///   0.016034737,
 ///   0.052480992,
+///   0.011406774,
+///   -0.06568693,
+///   -0.0030454374,
+///      ...truncated...
 /// ```
 ///
 ///
@@ -58,59 +70,47 @@ use vectordb::{connect, Result, Table, TableRef};
 ///
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), vectordb::Error> {
     let db = init_db().await?;
-    let documents = read_file_and_split_lines("tests/fixtures/mobi-dick.txt", 1000).unwrap();
+    let text_lines = read_file_and_split_lines("tests/fixtures/mobi-dick.txt", 1000)
+        .expect("Unable to read test file");
 
-    let embeddings = match create_embeddings(&documents) {
-        Ok(embeddings) => {
-            println!("Embeddings length: {}", embeddings.len());
-            println!("Embedding dimension: {}", embeddings[0].len());
-            embeddings
-        }
-        Err(e) => {
-            panic!("Error: {:?}", e);
-        }
-    };
+    let embeddings =
+        create_embeddings(&text_lines).expect("Unable to compute embeddings for test lines");
+    println!("Num records embedded: {}", embeddings.len());
+    println!("Embeddings dimension: {}", embeddings[0].len());
 
-    println!("Initial table names> {:?}", db.table_names().await?);
-    let tbl = create_table(db.clone(), embeddings, documents).await?;
+    let tbl = create_table("embeddings_test", db.clone(), embeddings, text_lines).await?;
     println!(
         "Number of records in the table> {}",
         tbl.count_rows(None).await?
     );
     create_index(tbl.as_ref(), "embeddings").await?;
-    let search_result = search(
-        tbl.as_ref(),
-        "Call me Ishmael. Some years ago—never mind how long precisely—having",
-    )
-    .await?;
-    for batch in &search_result {
-        println!("Number of 'records'> {}", batch.num_columns());
-        println!("Number of 'dimensions' in records> {}", batch.num_rows());
-        let ids = batch.column_by_name("id").unwrap();
-        let embeddings = batch.column_by_name("embeddings").unwrap();
-        let text = batch.column_by_name("text").unwrap();
-        // println!("Search results[count: {}]:", ids.len());
-        // println!("IDs> {:#?}", ids);
-        // println!("Text> {:#?}", text);
-        // println!("Embeddings> {:?}", embeddings);
 
-        println!("BATCH SCHEMA FIELDS: {:#?}", batch.schema().fields);
-        println!("BATCH SCHEMA METADATA: {:#?}", batch.schema().metadata);
+    let search_string = "Call me Ishmael. Some years ago—never mind how long precisely—having";
+    println!("Searching for string: '{}'", search_string);
+    let search_result = search(tbl.as_ref(), search_string).await?;
 
-        // for column in batch.columns() {
-        //     println!("COLUMN: {:#?}", column);
-        // }
+    for record_batch in &search_result {
+        println!("Number of 'records'> {}", record_batch.num_columns());
+        let ids = record_batch.column_by_name("id").unwrap();
+        let embeddings = record_batch.column_by_name("embeddings").unwrap();
+        let text = record_batch.column_by_name("text").unwrap();
+        let distances = record_batch.column_by_name("_distance").unwrap();
+        println!("Search results[count: {}]:", ids.len());
+        println!("IDs> {:#?}", ids);
+        println!("Text> {:#?}", text);
+        println!("Similarity distances> {:#?}", distances);
+        println!("Embeddings> {:?}", embeddings);
+        // println!("BATCH SCHEMA FIELDS: {:#?}", batch.schema().fields);
+        // println!("BATCH SCHEMA METADATA: {:#?}", batch.schema().metadata);
     }
-
-    tbl.delete("id > 24").await.unwrap();
-    db.drop_table("my_table").await.unwrap();
+    db.drop_table("embeddings_test").await.unwrap();
     Ok(())
 }
 
 /// Initializes the database.
-async fn init_db() -> Result<Arc<dyn Connection>> {
+async fn init_db() -> vectordb::Result<Arc<dyn Connection>> {
     drop_data_dir();
     let db = connect("data/sample-lancedb").await?;
     Ok(db)
@@ -125,11 +125,11 @@ fn drop_data_dir() {
 
 #[allow(dead_code)]
 /// Opens a table with an existing table name.
-async fn open_with_existing_tbl() -> Result<()> {
+async fn open_with_existing_tbl(table_name: &str) -> vectordb::Result<()> {
     let uri = "data/sample-lancedb";
     let db = connect(uri).await?;
     let _ = db
-        .open_table_with_params("my_table", Default::default())
+        .open_table_with_params(table_name, Default::default())
         .await
         .unwrap();
     Ok(())
@@ -137,10 +137,11 @@ async fn open_with_existing_tbl() -> Result<()> {
 
 /// Creates a table with embeddings and original text.
 async fn create_table(
+    table_name: &str,
     db: Arc<dyn Connection>,
     embeddings: Vec<Vec<f32>>,
     text: Vec<String>,
-) -> Result<TableRef> {
+) -> vectordb::Result<TableRef> {
     assert_eq!(
         embeddings.len(),
         text.len(),
@@ -166,7 +167,7 @@ async fn create_table(
     let batches = RecordBatchIterator::new(records_iter, schema.clone());
 
     let tbl = db
-        .create_table("my_table", Box::new(batches), None)
+        .create_table(table_name, Box::new(batches), None)
         .await
         .unwrap();
 
@@ -232,7 +233,7 @@ fn create_record_batch(
 
 #[allow(dead_code)]
 /// Creates an empty table with a schema.
-async fn create_empty_table(db: Arc<dyn Connection>) -> Result<TableRef> {
+async fn create_empty_table(db: Arc<dyn Connection>) -> vectordb::Result<TableRef> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int32, false),
         Field::new("item", DataType::Utf8, true),
@@ -243,7 +244,7 @@ async fn create_empty_table(db: Arc<dyn Connection>) -> Result<TableRef> {
 }
 
 /// Creates an index on a given field.
-async fn create_index(table: &dyn Table, field_name: &str) -> Result<()> {
+async fn create_index(table: &dyn Table, field_name: &str) -> vectordb::Result<()> {
     table
         .create_index(&[field_name])
         .ivf_pq()
@@ -253,18 +254,9 @@ async fn create_index(table: &dyn Table, field_name: &str) -> Result<()> {
 }
 
 /// Searches for a given text in the table.
-async fn search(table: &dyn Table, search_text: &str) -> Result<Vec<RecordBatch>> {
-    let query = match create_embeddings(&[search_text.to_string()]) {
-        Ok(embeddings) => {
-            println!("Embeddings length: {}", embeddings.len());
-            println!("Embedding dimension: {}", embeddings[0].len());
-
-            embeddings
-        }
-        Err(e) => {
-            panic!("Error: {:?}", e);
-        }
-    };
+async fn search(table: &dyn Table, search_text: &str) -> vectordb::Result<Vec<RecordBatch>> {
+    let query = create_embeddings(&[search_text.to_string()])
+        .expect("Failed to compute embeddings for query string");
     // flattening a 2D vector into a 1D vector. This is necessary because the search
     // function of the Table trait expects a 1D vector as input. However, the
     // create_embeddings function returns a 2D vector (a vector of embeddings,
@@ -283,17 +275,14 @@ async fn search(table: &dyn Table, search_text: &str) -> Result<Vec<RecordBatch>
 }
 
 /// Reads a file and splits its content into lines.
-fn read_file_and_split_lines<P>(filename: P, limit: usize) -> io::Result<Vec<String>>
-where
-    P: AsRef<Path>,
-{
-    let file = File::open(filename)?;
-    let reader = BufReader::new(file);
-    // return the first `limit` lines
-    let lines = reader
+fn read_file_and_split_lines<P: AsRef<Path>>(path: P, limit: usize) -> io::Result<Vec<String>> {
+    let content = fs::read_to_string(path)?;
+    let lines: Vec<String> = content
         .lines()
+        .filter(|line| !line.is_empty())
         .take(limit)
-        .collect::<std::result::Result<_, _>>()?;
+        .map(|line| line.to_string())
+        .collect();
     Ok(lines)
 }
 
