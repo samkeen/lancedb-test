@@ -148,19 +148,7 @@ async fn create_table(
         "Embeddings and text must be the same length"
     );
     let dimensions_count = embeddings[0].len();
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int32, false),
-        Field::new(
-            "embeddings",
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                dimensions_count as i32,
-            ),
-            true,
-        ),
-        Field::new("text", DataType::Utf8, false),
-    ]));
-
+    let schema = generate_schema(dimensions_count);
     let records_iter = create_record_batch(embeddings, text, schema.clone())
         .into_iter()
         .map(Ok);
@@ -233,14 +221,30 @@ fn create_record_batch(
 
 #[allow(dead_code)]
 /// Creates an empty table with a schema.
-async fn create_empty_table(db: Arc<dyn Connection>) -> vectordb::Result<TableRef> {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int32, false),
-        Field::new("item", DataType::Utf8, true),
-    ]));
+async fn create_empty_table(
+    db: Arc<dyn Connection>,
+    dimensions_count: usize,
+) -> vectordb::Result<TableRef> {
+    let schema = generate_schema(dimensions_count);
     let batches = RecordBatchIterator::new(vec![], schema.clone());
     db.create_table("empty_table", Box::new(batches), None)
         .await
+}
+
+fn generate_schema(dimensions_count: usize) -> Arc<Schema> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new(
+            "embeddings",
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                dimensions_count as i32,
+            ),
+            true,
+        ),
+        Field::new("text", DataType::Utf8, false),
+    ]));
+    schema
 }
 
 /// Creates an index on a given field.
