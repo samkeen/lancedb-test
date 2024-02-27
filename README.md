@@ -1,12 +1,14 @@
-# LanceDB test
+# LanceDB vector embeddings POC
 
-Working with lanceDB and the vectordb crate to investigate storing embeddings on LanceDB
+This is a proof of concept to show how one might utilize [LanceDB](https://lancedb.github.io/lancedb/) to
+store vector embeddings and perform vector searches.
 
-## Help for those new to LanceDB
+In this example we are using the [vectordb](https://crates.io/crates/vectordb) crate to interact with LanceDB and
+[fastembed](https://crates.io/crates/fastembed) to generate the embeddings.
 
-(such as myself)
+See the comments in `main.rs` for a step-by-step guide to the code.
 
-### Table search (query-building)
+## Table search (query-building)
 
 **Search**
 
@@ -39,7 +41,7 @@ prefilter: false,
 
 I've also found at this point in time (Feb/2024),
 the more mature [Python API docs](https://lancedb.github.io/lancedb/python/python/#lancedb.table.Table.compact_files)
-to have slightly more helpful explanations to ML novices such as I.
+to have slightly more helpful explanations.
 
 - `nearest_to` - Find the nearest vectors to the given query vector. You are typically always going to use this, hence
   the shortcut `table.search()` method.
