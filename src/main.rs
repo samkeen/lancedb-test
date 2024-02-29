@@ -10,9 +10,9 @@ use arrow_schema::{DataType, Field, Schema};
 use fastembed::{Embedding, EmbeddingModel, InitOptions, TextEmbedding};
 use futures::TryStreamExt;
 
-use vectordb::index::MetricType;
-use vectordb::Connection;
-use vectordb::{connect, Table, TableRef};
+use lancedb::connection::Connection;
+use lancedb::index::MetricType;
+use lancedb::{connect, Table, TableRef};
 
 /// This is a simple exampled that demonstrates how to use LanceDB to store embeddings and then
 /// search against those embeddings.
@@ -66,22 +66,23 @@ use vectordb::{connect, Table, TableRef};
 ///
 ///
 /// Thanks to the authors of this script for giving me a starting point
-/// - https://github.com/lancedb/lancedb/blob/main/rust/vectordb/examples/simple.rs
+/// - https://github.com/lancedb/lancedb/blob/main/rust/lancedb/examples/simple.rs
 ///
 ///
 
 #[tokio::main]
-async fn main() -> Result<(), vectordb::Error> {
+async fn main() -> Result<(), lancedb::Error> {
     let db = init_db().await?;
     let text_lines = read_file_and_split_lines("tests/fixtures/mobi-dick.txt", 1000)
         .expect("Unable to read test file");
 
-    let embeddings =
-        create_embeddings(&text_lines).expect("Unable to compute embeddings for test lines");
+    let embeddings = vec![vec![1.0f32; 384]; 1000];
+    // HuggingFace is DOWN :(
+    // create_embeddings(&text_lines).expect("Unable to compute embeddings for test lines");
     println!("Num records embedded: {}", embeddings.len());
     println!("Embeddings dimension: {}", embeddings[0].len());
 
-    let tbl = create_table("embeddings_test", db.clone(), embeddings, text_lines).await?;
+    let tbl = create_table("embeddings_test", &db, embeddings, text_lines).await?;
     println!(
         "Number of records in the table> {}",
         tbl.count_rows(None).await?
@@ -90,30 +91,40 @@ async fn main() -> Result<(), vectordb::Error> {
 
     let search_string = "Call me Ishmael. Some years ago—never mind how long precisely—having";
     println!("Searching for string: '{}'", search_string);
-    let search_result = search(tbl.as_ref(), search_string).await?;
+    // let search_result = search(tbl.as_ref(), search_string).await?;
+    let search_result = get_all_records(tbl.as_ref()).await?;
 
     for record_batch in &search_result {
-        println!("Number of 'records'> {}", record_batch.num_columns());
-        let ids = record_batch.column_by_name("id").unwrap();
-        let embeddings = record_batch.column_by_name("embeddings").unwrap();
-        let text = record_batch.column_by_name("text").unwrap();
-        let distances = record_batch.column_by_name("_distance").unwrap();
-        println!("Search results[count: {}]:", ids.len());
-        println!("IDs> {:#?}", ids);
-        println!("Text> {:#?}", text);
-        println!("Similarity distances> {:#?}", distances);
-        println!("Embeddings> {:?}", embeddings);
-        // println!("BATCH SCHEMA FIELDS: {:#?}", batch.schema().fields);
-        // println!("BATCH SCHEMA METADATA: {:#?}", batch.schema().metadata);
+        println!(
+            "Number of 'records' returned from search> {}",
+            record_batch.num_rows()
+        );
+        // let ids = record_batch.column_by_name("id").unwrap();
+        // let embeddings = record_batch.column_by_name("embeddings").unwrap();
+        // let text = record_batch.column_by_name("text").unwrap();
+        // let distances = record_batch.column_by_name("_distance").unwrap();
+        // println!("Search results[count: {}]:", ids.len());
+        // println!("IDs> {:#?}", ids);
+        // println!("Text> {:#?}", text);
+        // println!("Similarity distances> {:#?}", distances);
+        // println!("Embeddings> {:?}", embeddings);
+        for field in record_batch.schema().fields() {
+            println!("Field: {:#?}", field.name());
+        }
+        println!("BATCH SCHEMA FIELDS: {:#?}", record_batch.schema().fields);
+        println!(
+            "BATCH SCHEMA METADATA: {:#?}",
+            record_batch.schema().metadata
+        );
     }
     db.drop_table("embeddings_test").await.unwrap();
     Ok(())
 }
 
 /// Initializes the database.
-async fn init_db() -> vectordb::Result<Arc<dyn Connection>> {
+async fn init_db() -> lancedb::Result<Connection> {
     drop_data_dir();
-    let db = connect("data/sample-lancedb").await?;
+    let db = connect("data/sample-lancedb").execute().await?;
     Ok(db)
 }
 
@@ -126,23 +137,20 @@ fn drop_data_dir() {
 
 #[allow(dead_code)]
 /// Opens a table with an existing table name.
-async fn open_with_existing_tbl(table_name: &str) -> vectordb::Result<()> {
+async fn open_with_existing_tbl(table_name: &str) -> lancedb::Result<()> {
     let uri = "data/sample-lancedb";
-    let db = connect(uri).await?;
-    let _ = db
-        .open_table_with_params(table_name, Default::default())
-        .await
-        .unwrap();
+    let db = connect(uri).execute().await?;
+    let _ = db.open_table(table_name).execute().await.unwrap();
     Ok(())
 }
 
 /// Creates a table with embeddings and original text.
 async fn create_table(
     table_name: &str,
-    db: Arc<dyn Connection>,
+    db: &Connection,
     embeddings: Vec<Vec<f32>>,
     text: Vec<String>,
-) -> vectordb::Result<TableRef> {
+) -> lancedb::Result<TableRef> {
     assert_eq!(
         embeddings.len(),
         text.len(),
@@ -156,7 +164,8 @@ async fn create_table(
     let batches = RecordBatchIterator::new(records_iter, schema.clone());
 
     let tbl = db
-        .create_table(table_name, Box::new(batches), None)
+        .create_table(table_name, Box::new(batches))
+        .execute()
         .await
         .unwrap();
 
@@ -223,12 +232,13 @@ fn create_record_batch(
 #[allow(dead_code)]
 /// Creates an empty table with a schema.
 async fn create_empty_table(
-    db: Arc<dyn Connection>,
+    db: Arc<Connection>,
     dimensions_count: usize,
-) -> vectordb::Result<TableRef> {
+) -> lancedb::Result<TableRef> {
     let schema = generate_schema(dimensions_count);
     let batches = RecordBatchIterator::new(vec![], schema.clone());
-    db.create_table("empty_table", Box::new(batches), None)
+    db.create_table("empty_table", Box::new(batches))
+        .execute()
         .await
 }
 
@@ -249,7 +259,7 @@ fn generate_schema(dimensions_count: usize) -> Arc<Schema> {
 }
 
 /// Creates an index on a given field.
-async fn create_index(table: &dyn Table, field_name: &str) -> vectordb::Result<()> {
+async fn create_index(table: &dyn Table, field_name: &str) -> lancedb::Result<()> {
     table
         .create_index(&[field_name])
         .ivf_pq()
@@ -259,7 +269,7 @@ async fn create_index(table: &dyn Table, field_name: &str) -> vectordb::Result<(
 }
 
 /// Searches for a given text in the table.
-async fn search(table: &dyn Table, search_text: &str) -> vectordb::Result<Vec<RecordBatch>> {
+async fn search(table: &dyn Table, search_text: &str) -> lancedb::Result<Vec<RecordBatch>> {
     let query = create_embeddings(&[search_text.to_string()])
         .expect("Failed to compute embeddings for query string");
     // flattening a 2D vector into a 1D vector. This is necessary because the search
@@ -274,6 +284,15 @@ async fn search(table: &dyn Table, search_text: &str) -> vectordb::Result<Vec<Re
         .search(&query)
         .metric_type(MetricType::L2) // this is the default
         .limit(2)
+        .execute_stream()
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?)
+}
+
+async fn get_all_records(table: &dyn Table) -> lancedb::Result<Vec<RecordBatch>> {
+    Ok(table
+        .query()
         .execute_stream()
         .await?
         .try_collect::<Vec<_>>()

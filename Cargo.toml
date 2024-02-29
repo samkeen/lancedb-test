@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-vectordb = "0.4.10"
+lancedb = "0.4.11"
 tokio = "1.36.0"
 futures = "0.3.30"
 arrow-array = "50.0.0"
