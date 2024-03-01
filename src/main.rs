@@ -1,22 +1,11 @@
 mod db;
 
-use std::path::Path;
-use std::sync::Arc;
-use std::{fs, io};
-
-use arrow_array::types::Float32Type;
-use arrow_array::{
-    ArrayRef, FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator, StringArray,
-};
-use arrow_schema::{DataType, Field, Schema};
-use fastembed::{Embedding, EmbeddingModel, InitOptions, TextEmbedding};
-use futures::TryStreamExt;
-
-use lancedb::connection::Connection;
-use lancedb::index::MetricType;
-use lancedb::{connect, Table, TableRef};
-
 use db::EmbedStore;
+use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use lancedb::connect;
+use lancedb::connection::Connection;
+use std::path::Path;
+use std::{fs, io};
 
 /// This is a simple exampled that demonstrates how to use LanceDB to store embeddings and then
 /// search against those embeddings.
@@ -92,263 +81,46 @@ async fn main() -> Result<(), lancedb::Error> {
 
     db.add(text_lines).await;
 
-    match db
+    db.create_index(None).await;
+
+    if let Ok(search_result) = db
         .search("Call me Ishmael. Some years ago—never mind how long precisely—having")
         .await
     {
-        Ok(search_result) => {
-            for record_batch in &search_result {
-                println!(
-                    "Number of 'records' returned from search> {}",
-                    record_batch.num_rows()
-                );
-                // let ids = record_batch.column_by_name("id").unwrap();
-                // let embeddings = record_batch.column_by_name("embeddings").unwrap();
-                // let text = record_batch.column_by_name("text").unwrap();
-                // let distances = record_batch.column_by_name("_distance").unwrap();
-                // println!("Search results[count: {}]:", ids.len());
-                // println!("IDs> {:#?}", ids);
-                // println!("Text> {:#?}", text);
-                // println!("Similarity distances> {:#?}", distances);
-                // println!("Embeddings> {:?}", embeddings);
-                for field in record_batch.schema().fields() {
-                    println!("Field: {:#?}", field.name());
-                }
-                println!("BATCH SCHEMA FIELDS: {:#?}", record_batch.schema().fields);
-                println!(
-                    "BATCH SCHEMA METADATA: {:#?}",
-                    record_batch.schema().metadata
-                );
+        for record_batch in &search_result {
+            println!(
+                "Number of 'records' returned from search> {}",
+                record_batch.num_rows()
+            );
+            // let ids = record_batch.column_by_name("id").unwrap();
+            // let embeddings = record_batch.column_by_name("embeddings").unwrap();
+            // let text = record_batch.column_by_name("text").unwrap();
+            // let distances = record_batch.column_by_name("_distance").unwrap();
+            // println!("Search results[count: {}]:", ids.len());
+            // println!("IDs> {:#?}", ids);
+            // println!("Text> {:#?}", text);
+            // println!("Similarity distances> {:#?}", distances);
+            // println!("Embeddings> {:?}", embeddings);
+            for field in record_batch.schema().fields() {
+                println!("Field: {:#?}", field.name());
             }
+            println!("BATCH SCHEMA FIELDS: {:#?}", record_batch.schema().fields);
+            println!(
+                "BATCH SCHEMA METADATA: {:#?}",
+                record_batch.schema().metadata
+            );
         }
-        Err(_) => {}
     }
-
-    // let db = init_db().await?;
-    // let text_lines = read_file_and_split_lines("tests/fixtures/mobi-dick.txt", 1000)
-    //     .expect("Unable to read test file");
-    //
-    // let embeddings = vec![vec![1.0f32; 384]; 1000];
-    // // HuggingFace is DOWN :(
-    // // create_embeddings(&text_lines).expect("Unable to compute embeddings for test lines");
-    // println!("Num records embedded: {}", embeddings.len());
-    // println!("Embeddings dimension: {}", embeddings[0].len());
-    //
-    // let tbl = create_table("embeddings_test", &db, embeddings, text_lines).await?;
-    // println!(
-    //     "Number of records in the table> {}",
-    //     tbl.count_rows(None).await?
-    // );
-    // create_index(tbl.as_ref(), "embeddings").await?;
-    //
-    // let search_string = "Call me Ishmael. Some years ago—never mind how long precisely—having";
-    // println!("Searching for string: '{}'", search_string);
-    // let search_result = search(tbl.as_ref(), search_string).await?;
-    // // let search_result = get_all_records(tbl.as_ref()).await?;
-    //
-    // for record_batch in &search_result {
-    //     println!(
-    //         "Number of 'records' returned from search> {}",
-    //         record_batch.num_rows()
-    //     );
-    //     // let ids = record_batch.column_by_name("id").unwrap();
-    //     // let embeddings = record_batch.column_by_name("embeddings").unwrap();
-    //     // let text = record_batch.column_by_name("text").unwrap();
-    //     // let distances = record_batch.column_by_name("_distance").unwrap();
-    //     // println!("Search results[count: {}]:", ids.len());
-    //     // println!("IDs> {:#?}", ids);
-    //     // println!("Text> {:#?}", text);
-    //     // println!("Similarity distances> {:#?}", distances);
-    //     // println!("Embeddings> {:?}", embeddings);
-    //     for field in record_batch.schema().fields() {
-    //         println!("Field: {:#?}", field.name());
-    //     }
-    //     println!("BATCH SCHEMA FIELDS: {:#?}", record_batch.schema().fields);
-    //     println!(
-    //         "BATCH SCHEMA METADATA: {:#?}",
-    //         record_batch.schema().metadata
-    //     );
-    // }
-    // db.drop_table("embeddings_test").await.unwrap();
     Ok(())
 }
 
 /// Initializes the database.
 async fn reset_db() -> lancedb::Result<Connection> {
-    drop_data_dir();
-    let db = connect("data/sample-lancedb").execute().await?;
-    Ok(db)
-}
-
-/// Drops the data directory if it exists.
-fn drop_data_dir() {
     if Path::new("data").exists() {
         std::fs::remove_dir_all("data").unwrap();
     }
-}
-
-#[allow(dead_code)]
-/// Opens a table with an existing table name.
-async fn open_with_existing_tbl(table_name: &str) -> lancedb::Result<()> {
-    let uri = "data/sample-lancedb";
-    let db = connect(uri).execute().await?;
-    let _ = db.open_table(table_name).execute().await.unwrap();
-    Ok(())
-}
-
-/// Creates a table with embeddings and original text.
-async fn create_table(
-    table_name: &str,
-    db: &Connection,
-    embeddings: Vec<Vec<f32>>,
-    text: Vec<String>,
-) -> lancedb::Result<TableRef> {
-    assert_eq!(
-        embeddings.len(),
-        text.len(),
-        "Embeddings and text must be the same length"
-    );
-    let dimensions_count = embeddings[0].len();
-    let schema = generate_schema(dimensions_count);
-    let records_iter = create_record_batch(embeddings, text, schema.clone())
-        .into_iter()
-        .map(Ok);
-    let batches = RecordBatchIterator::new(records_iter, schema.clone());
-
-    let tbl = db
-        .create_table(table_name, Box::new(batches))
-        .execute()
-        .await
-        .unwrap();
-
-    Ok(tbl)
-}
-
-/// Transforms a 2D vector into a 2D vector where each element is wrapped in an `Option`.
-///
-/// This function takes a 2D vector `source` as input and returns a new 2D vector where each element
-/// is wrapped in an `Option`.
-/// The outer vector is also wrapped in an `Option`. This is useful when you want to represent the
-/// absence of data in your vector.
-///
-/// # Arguments
-///
-/// * `source` - A 2D vector that will be transformed.
-///
-/// # Returns
-///
-/// A 2D vector where each element is wrapped in an `Option`, and the outer vector is also wrapped in an `Option`.
-///
-/// # Example
-///
-/// ```
-/// let source = vec![vec![1, 2, 3], vec![4, 5, 6]];
-/// let result = wrap_in_option(source);
-/// assert_eq!(result, vec![Some(vec![Some(1), Some(2), Some(3)]), Some(vec![Some(4), Some(5), Some(6)])]);
-/// ```
-fn wrap_in_option<T>(source: Vec<Vec<T>>) -> Vec<Option<Vec<Option<T>>>> {
-    source
-        .into_iter()
-        .map(|inner_vec| Some(inner_vec.into_iter().map(|item| Some(item)).collect()))
-        .collect()
-}
-
-/// Creates a record batch from a list of embeddings and a correlated list of original text.
-fn create_record_batch(
-    embeddings: Vec<Vec<f32>>,
-    text: Vec<String>,
-    schema: Arc<Schema>,
-) -> Vec<RecordBatch> {
-    let total_records_count = embeddings.len();
-    let dimensions_count = embeddings[0].len();
-    let wrapped_source = wrap_in_option(embeddings);
-    vec![RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            // id field
-            Arc::new(Int32Array::from_iter_values(0..total_records_count as i32)),
-            // Embeddings field
-            Arc::new(
-                FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-                    wrapped_source,
-                    dimensions_count as i32,
-                ),
-            ),
-            // Text field
-            Arc::new(Arc::new(StringArray::from(text)) as ArrayRef),
-        ],
-    )
-    .unwrap()]
-}
-
-#[allow(dead_code)]
-/// Creates an empty table with a schema.
-async fn create_empty_table(
-    db: Arc<Connection>,
-    dimensions_count: usize,
-) -> lancedb::Result<TableRef> {
-    let schema = generate_schema(dimensions_count);
-    let batches = RecordBatchIterator::new(vec![], schema.clone());
-    db.create_table("empty_table", Box::new(batches))
-        .execute()
-        .await
-}
-
-fn generate_schema(dimensions_count: usize) -> Arc<Schema> {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int32, false),
-        Field::new(
-            "embeddings",
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                dimensions_count as i32,
-            ),
-            true,
-        ),
-        Field::new("text", DataType::Utf8, false),
-    ]));
-    schema
-}
-
-/// Creates an index on a given field.
-async fn create_index(table: &dyn Table, field_name: &str) -> lancedb::Result<()> {
-    table
-        .create_index(&[field_name])
-        .ivf_pq()
-        .num_partitions(8)
-        .build()
-        .await
-}
-
-/// Searches for a given text in the table.
-async fn search(table: &dyn Table, search_text: &str) -> lancedb::Result<Vec<RecordBatch>> {
-    let query = create_embeddings(&[search_text.to_string()])
-        .expect("Failed to compute embeddings for query string");
-    // flattening a 2D vector into a 1D vector. This is necessary because the search
-    // function of the Table trait expects a 1D vector as input. However, the
-    // create_embeddings function returns a 2D vector (a vector of embeddings,
-    // where each embedding is itself a vector)
-    let query: Vec<f32> = query
-        .into_iter()
-        .flat_map(|embedding| embedding.to_vec())
-        .collect();
-    Ok(table
-        .search(&query)
-        .metric_type(MetricType::L2) // this is the default
-        .limit(2)
-        .execute_stream()
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?)
-}
-
-async fn get_all_records(table: &dyn Table) -> lancedb::Result<Vec<RecordBatch>> {
-    Ok(table
-        .query()
-        .execute_stream()
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?)
+    let db = connect("data/sample-lancedb").execute().await?;
+    Ok(db)
 }
 
 /// Reads a file and splits its content into lines.
@@ -361,15 +133,4 @@ fn read_file_and_split_lines<P: AsRef<Path>>(path: P, limit: usize) -> io::Resul
         .map(|line| line.to_string())
         .collect();
     Ok(lines)
-}
-
-/// Generates embeddings for a list of documents.
-fn create_embeddings(documents: &[String]) -> anyhow::Result<Vec<Embedding>> {
-    let model = TextEmbedding::try_new(InitOptions {
-        model_name: EmbeddingModel::AllMiniLML6V2,
-        show_download_progress: true,
-        ..Default::default()
-    })?;
-    // Generate embeddings with the default batch size, 256
-    model.embed(documents.to_vec(), None)
 }

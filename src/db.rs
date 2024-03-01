@@ -1,4 +1,3 @@
-use crate::{create_embeddings, drop_data_dir, generate_schema, wrap_in_option};
 use arrow_array::types::Float32Type;
 use arrow_array::{
     ArrayRef, FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator, StringArray,
@@ -20,15 +19,21 @@ const EMBEDDING_DIMENSIONS: usize = 384;
 pub struct EmbedStore {
     embedding_model: TextEmbedding,
     db_conn: Connection,
+    table: Arc<dyn Table>,
 }
 
 impl EmbedStore {
     pub async fn new(embedding_model: TextEmbedding) -> EmbedStore {
+        let db_conn = Self::init_db_conn()
+            .await
+            .expect("Failed to initialize database");
+        let table = Self::get_or_create_table(&db_conn, TABLE_NAME)
+            .await
+            .expect("Failed to create table");
         EmbedStore {
             embedding_model,
-            db_conn: Self::init_db_conn()
-                .await
-                .expect("Failed to initialize database"),
+            db_conn,
+            table,
         }
     }
 
@@ -41,28 +46,21 @@ impl EmbedStore {
             EMBEDDING_DIMENSIONS,
             "Embedding dimensions mismatch"
         );
-        let table = self
-            .get_or_create_table(TABLE_NAME)
-            .await
-            .expect("Failed to create table");
-        let schema = table.schema().await.expect("Failed to get schema");
+        let schema = self.table.schema().await.expect("Failed to get schema");
         let records_iter = self
             .create_record_batch(embeddings, text, schema.clone())
             .into_iter()
             .map(Ok);
         let batches = RecordBatchIterator::new(records_iter, schema.clone());
-        table
+        self.table
             .add(Box::new(batches), AddDataOptions::default())
             .await
             .expect("Failed adding data to table");
     }
 
     pub async fn get_all(&self) -> lancedb::Result<Vec<RecordBatch>> {
-        let table = self
-            .get_or_create_table(TABLE_NAME)
-            .await
-            .expect("Failed to create table");
-        Ok(table
+        Ok(self
+            .table
             .query()
             .execute_stream()
             .await?
@@ -71,15 +69,15 @@ impl EmbedStore {
     }
 
     pub async fn record_count(&self) -> usize {
-        let table = self
-            .get_or_create_table(TABLE_NAME)
+        self.table
+            .count_rows(None)
             .await
-            .expect("Failed to create table");
-        table.count_rows(None).await.expect("Failed to count rows")
+            .expect("Failed to count rows")
     }
 
     pub async fn search(&self, search_text: &str) -> lancedb::Result<Vec<RecordBatch>> {
-        let query = create_embeddings(&[search_text.to_string()])
+        let query = self
+            .create_embeddings(&[search_text.to_string()])
             .expect("Failed to compute embeddings for query string");
         // flattening a 2D vector into a 1D vector. This is necessary because the search
         // function of the Table trait expects a 1D vector as input. However, the
@@ -89,11 +87,8 @@ impl EmbedStore {
             .into_iter()
             .flat_map(|embedding| embedding.to_vec())
             .collect();
-        let table = self
-            .get_or_create_table(TABLE_NAME)
-            .await
-            .expect("Failed to create table");
-        Ok(table
+        Ok(self
+            .table
             .search(&query)
             .metric_type(MetricType::L2) // this is the default
             .limit(2)
@@ -104,11 +99,7 @@ impl EmbedStore {
     }
 
     pub async fn delete<T: std::fmt::Display>(&self, id: T) {
-        let table = self
-            .get_or_create_table(TABLE_NAME)
-            .await
-            .expect("Failed to create table");
-        table
+        self.table
             .delete(format!("id > {id}").as_str())
             .await
             .expect("Failed to delete table");
@@ -140,15 +131,31 @@ impl EmbedStore {
     }
 
     fn create_embeddings(&self, documents: &[String]) -> anyhow::Result<Vec<Embedding>> {
-        // let model = TextEmbedding::try_new(InitOptions {
-        //     model_name: EmbeddingModel::AllMiniLML6V2,
-        //     show_download_progress: true,
-        //     ..Default::default()
-        // })?;
-        // Generate embeddings with the default batch size, 256
         self.embedding_model.embed(documents.to_vec(), None)
     }
 
+    /// Transforms a 2D vector into a 2D vector where each element is wrapped in an `Option`.
+    ///
+    /// This function takes a 2D vector `source` as input and returns a new 2D vector where each element
+    /// is wrapped in an `Option`.
+    /// The outer vector is also wrapped in an `Option`. This is useful when you want to represent the
+    /// absence of data in your vector.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - A 2D vector that will be transformed.
+    ///
+    /// # Returns
+    ///
+    /// A 2D vector where each element is wrapped in an `Option`, and the outer vector is also wrapped in an `Option`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let source = vec![vec![1, 2, 3], vec![4, 5, 6]];
+    /// let result = wrap_in_option(source);
+    /// assert_eq!(result, vec![Some(vec![Some(1), Some(2), Some(3)]), Some(vec![Some(4), Some(5), Some(6)])]);
+    /// ```
     fn wrap_in_option<T>(&self, source: Vec<Vec<T>>) -> Vec<Option<Vec<Option<T>>>> {
         source
             .into_iter()
@@ -165,7 +172,7 @@ impl EmbedStore {
     ) -> Vec<RecordBatch> {
         let total_records_count = embeddings.len();
         let dimensions_count = embeddings[0].len();
-        let wrapped_source = wrap_in_option(embeddings);
+        let wrapped_source = self.wrap_in_option(embeddings);
         vec![RecordBatch::try_new(
             schema.clone(),
             vec![
@@ -185,7 +192,7 @@ impl EmbedStore {
         .unwrap()]
     }
 
-    fn generate_schema(&self, dimensions_count: usize) -> Arc<Schema> {
+    fn generate_schema(dimensions_count: usize) -> Arc<Schema> {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
             Field::new(
@@ -201,18 +208,23 @@ impl EmbedStore {
         schema
     }
 
-    async fn get_or_create_table(&self, table_name: &str) -> lancedb::Result<TableRef> {
-        let db = self.db_conn.clone();
-        let table_names = self.db_conn.table_names().await?;
+    async fn get_or_create_table(
+        db_conn: &Connection,
+        table_name: &str,
+    ) -> lancedb::Result<Arc<dyn Table>> {
+        let table_names = db_conn.table_names().await?;
         let table = table_names.iter().find(|&name| name == table_name);
         match table {
             Some(_) => {
-                let table = db.open_table(table_name).execute().await?;
+                let table = db_conn.open_table(table_name).execute().await?;
                 Ok(table)
             }
             None => {
-                let table = self
-                    .create_empty_table(table_name, EMBEDDING_DIMENSIONS)
+                let schema = Self::generate_schema(EMBEDDING_DIMENSIONS);
+                let batches = RecordBatchIterator::new(vec![], schema.clone());
+                let table = db_conn
+                    .create_table(table_name, Box::new(batches))
+                    .execute()
                     .await?;
                 Ok(table)
             }
@@ -225,7 +237,7 @@ impl EmbedStore {
         table_name: &str,
         dimensions_count: usize,
     ) -> lancedb::Result<TableRef> {
-        let schema = generate_schema(dimensions_count);
+        let schema = Self::generate_schema(dimensions_count);
         let batches = RecordBatchIterator::new(vec![], schema.clone());
         self.db_conn
             .create_table(table_name, Box::new(batches))
@@ -234,12 +246,14 @@ impl EmbedStore {
     }
 
     /// Creates an index on a given field.
-    async fn create_index(&self, table: &dyn Table, field_name: &str) -> lancedb::Result<()> {
-        table
-            .create_index(&[field_name])
+    pub async fn create_index(&self, num_partitions: Option<u32>) {
+        let num_partitions = num_partitions.unwrap_or(8);
+        self.table
+            .create_index(&["embeddings"])
             .ivf_pq()
-            .num_partitions(8)
+            .num_partitions(num_partitions)
             .build()
             .await
+            .expect("Failed to create index")
     }
 }
