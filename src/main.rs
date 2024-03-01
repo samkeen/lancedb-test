@@ -16,6 +16,8 @@ use lancedb::connection::Connection;
 use lancedb::index::MetricType;
 use lancedb::{connect, Table, TableRef};
 
+use db::EmbedStore;
+
 /// This is a simple exampled that demonstrates how to use LanceDB to store embeddings and then
 /// search against those embeddings.
 ///
@@ -74,57 +76,105 @@ use lancedb::{connect, Table, TableRef};
 
 #[tokio::main]
 async fn main() -> Result<(), lancedb::Error> {
-    let db = init_db().await?;
+    // RESET THE DB FOR TESTING
+    reset_db().await.expect("Unable to reset db");
+
+    let embedding_model = TextEmbedding::try_new(InitOptions {
+        model_name: EmbeddingModel::AllMiniLML6V2,
+        show_download_progress: true,
+        ..Default::default()
+    })
+    .expect("Unable to create embedding model");
+    let db = EmbedStore::new(embedding_model).await;
+
     let text_lines = read_file_and_split_lines("tests/fixtures/mobi-dick.txt", 1000)
         .expect("Unable to read test file");
 
-    let embeddings = vec![vec![1.0f32; 384]; 1000];
-    // HuggingFace is DOWN :(
-    // create_embeddings(&text_lines).expect("Unable to compute embeddings for test lines");
-    println!("Num records embedded: {}", embeddings.len());
-    println!("Embeddings dimension: {}", embeddings[0].len());
+    db.add(text_lines).await;
 
-    let tbl = create_table("embeddings_test", &db, embeddings, text_lines).await?;
-    println!(
-        "Number of records in the table> {}",
-        tbl.count_rows(None).await?
-    );
-    create_index(tbl.as_ref(), "embeddings").await?;
-
-    let search_string = "Call me Ishmael. Some years ago—never mind how long precisely—having";
-    println!("Searching for string: '{}'", search_string);
-    // let search_result = search(tbl.as_ref(), search_string).await?;
-    let search_result = get_all_records(tbl.as_ref()).await?;
-
-    for record_batch in &search_result {
-        println!(
-            "Number of 'records' returned from search> {}",
-            record_batch.num_rows()
-        );
-        // let ids = record_batch.column_by_name("id").unwrap();
-        // let embeddings = record_batch.column_by_name("embeddings").unwrap();
-        // let text = record_batch.column_by_name("text").unwrap();
-        // let distances = record_batch.column_by_name("_distance").unwrap();
-        // println!("Search results[count: {}]:", ids.len());
-        // println!("IDs> {:#?}", ids);
-        // println!("Text> {:#?}", text);
-        // println!("Similarity distances> {:#?}", distances);
-        // println!("Embeddings> {:?}", embeddings);
-        for field in record_batch.schema().fields() {
-            println!("Field: {:#?}", field.name());
+    match db
+        .search("Call me Ishmael. Some years ago—never mind how long precisely—having")
+        .await
+    {
+        Ok(search_result) => {
+            for record_batch in &search_result {
+                println!(
+                    "Number of 'records' returned from search> {}",
+                    record_batch.num_rows()
+                );
+                // let ids = record_batch.column_by_name("id").unwrap();
+                // let embeddings = record_batch.column_by_name("embeddings").unwrap();
+                // let text = record_batch.column_by_name("text").unwrap();
+                // let distances = record_batch.column_by_name("_distance").unwrap();
+                // println!("Search results[count: {}]:", ids.len());
+                // println!("IDs> {:#?}", ids);
+                // println!("Text> {:#?}", text);
+                // println!("Similarity distances> {:#?}", distances);
+                // println!("Embeddings> {:?}", embeddings);
+                for field in record_batch.schema().fields() {
+                    println!("Field: {:#?}", field.name());
+                }
+                println!("BATCH SCHEMA FIELDS: {:#?}", record_batch.schema().fields);
+                println!(
+                    "BATCH SCHEMA METADATA: {:#?}",
+                    record_batch.schema().metadata
+                );
+            }
         }
-        println!("BATCH SCHEMA FIELDS: {:#?}", record_batch.schema().fields);
-        println!(
-            "BATCH SCHEMA METADATA: {:#?}",
-            record_batch.schema().metadata
-        );
+        Err(_) => {}
     }
-    db.drop_table("embeddings_test").await.unwrap();
+
+    // let db = init_db().await?;
+    // let text_lines = read_file_and_split_lines("tests/fixtures/mobi-dick.txt", 1000)
+    //     .expect("Unable to read test file");
+    //
+    // let embeddings = vec![vec![1.0f32; 384]; 1000];
+    // // HuggingFace is DOWN :(
+    // // create_embeddings(&text_lines).expect("Unable to compute embeddings for test lines");
+    // println!("Num records embedded: {}", embeddings.len());
+    // println!("Embeddings dimension: {}", embeddings[0].len());
+    //
+    // let tbl = create_table("embeddings_test", &db, embeddings, text_lines).await?;
+    // println!(
+    //     "Number of records in the table> {}",
+    //     tbl.count_rows(None).await?
+    // );
+    // create_index(tbl.as_ref(), "embeddings").await?;
+    //
+    // let search_string = "Call me Ishmael. Some years ago—never mind how long precisely—having";
+    // println!("Searching for string: '{}'", search_string);
+    // let search_result = search(tbl.as_ref(), search_string).await?;
+    // // let search_result = get_all_records(tbl.as_ref()).await?;
+    //
+    // for record_batch in &search_result {
+    //     println!(
+    //         "Number of 'records' returned from search> {}",
+    //         record_batch.num_rows()
+    //     );
+    //     // let ids = record_batch.column_by_name("id").unwrap();
+    //     // let embeddings = record_batch.column_by_name("embeddings").unwrap();
+    //     // let text = record_batch.column_by_name("text").unwrap();
+    //     // let distances = record_batch.column_by_name("_distance").unwrap();
+    //     // println!("Search results[count: {}]:", ids.len());
+    //     // println!("IDs> {:#?}", ids);
+    //     // println!("Text> {:#?}", text);
+    //     // println!("Similarity distances> {:#?}", distances);
+    //     // println!("Embeddings> {:?}", embeddings);
+    //     for field in record_batch.schema().fields() {
+    //         println!("Field: {:#?}", field.name());
+    //     }
+    //     println!("BATCH SCHEMA FIELDS: {:#?}", record_batch.schema().fields);
+    //     println!(
+    //         "BATCH SCHEMA METADATA: {:#?}",
+    //         record_batch.schema().metadata
+    //     );
+    // }
+    // db.drop_table("embeddings_test").await.unwrap();
     Ok(())
 }
 
 /// Initializes the database.
-async fn init_db() -> lancedb::Result<Connection> {
+async fn reset_db() -> lancedb::Result<Connection> {
     drop_data_dir();
     let db = connect("data/sample-lancedb").execute().await?;
     Ok(db)

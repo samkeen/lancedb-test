@@ -1,20 +1,22 @@
-use crate::{drop_data_dir, generate_schema, wrap_in_option};
+use crate::{create_embeddings, drop_data_dir, generate_schema, wrap_in_option};
 use arrow_array::types::Float32Type;
 use arrow_array::{
     ArrayRef, FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator, StringArray,
 };
 use arrow_schema::{DataType, Field, Schema};
-use fastembed::{Embedding, EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{Embedding, TextEmbedding};
+use futures::TryStreamExt;
 use lancedb::connection::Connection;
+use lancedb::index::MetricType;
 use lancedb::table::AddDataOptions;
 use lancedb::{connect, Table, TableRef};
-use std::fmt::format;
 use std::path::Path;
 use std::sync::Arc;
 
 const DB_DIR: &str = "data";
 const DB_NAME: &str = "sample-lancedb";
 const TABLE_NAME: &str = "documents";
+const EMBEDDING_DIMENSIONS: usize = 384;
 pub struct EmbedStore {
     embedding_model: TextEmbedding,
     db_conn: Connection,
@@ -30,40 +32,99 @@ impl EmbedStore {
         }
     }
 
-    pub async fn add(&self, text: &str) {
+    pub async fn add(&self, text: Vec<String>) {
         let embeddings = self
-            .create_embeddings(&[text.to_string()])
+            .create_embeddings(&text)
             .expect("Failed to create embeddings");
+        assert_eq!(
+            embeddings[0].len(),
+            EMBEDDING_DIMENSIONS,
+            "Embedding dimensions mismatch"
+        );
         let table = self
-            .get_or_create_table(TABLE_NAME, embeddings[0].len())
+            .get_or_create_table(TABLE_NAME)
             .await
             .expect("Failed to create table");
         let schema = table.schema().await.expect("Failed to get schema");
         let records_iter = self
-            .create_record_batch(embeddings, vec![text.to_string()], schema.clone())
+            .create_record_batch(embeddings, text, schema.clone())
             .into_iter()
             .map(Ok);
         let batches = RecordBatchIterator::new(records_iter, schema.clone());
-        let result = table
+        table
             .add(Box::new(batches), AddDataOptions::default())
-            .await;
-        !todo!("CONTINUE HERE");
+            .await
+            .expect("Failed adding data to table");
     }
 
-    pub fn get_all(&self) {
-        println!("Getting embeddings");
+    pub async fn get_all(&self) -> lancedb::Result<Vec<RecordBatch>> {
+        let table = self
+            .get_or_create_table(TABLE_NAME)
+            .await
+            .expect("Failed to create table");
+        Ok(table
+            .query()
+            .execute_stream()
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?)
     }
 
-    pub fn search(&self) {
-        println!("Searching embeddings");
+    pub async fn record_count(&self) -> usize {
+        let table = self
+            .get_or_create_table(TABLE_NAME)
+            .await
+            .expect("Failed to create table");
+        table.count_rows(None).await.expect("Failed to count rows")
     }
 
-    pub fn delete(&self) {
-        println!("Deleting embeddings");
+    pub async fn search(&self, search_text: &str) -> lancedb::Result<Vec<RecordBatch>> {
+        let query = create_embeddings(&[search_text.to_string()])
+            .expect("Failed to compute embeddings for query string");
+        // flattening a 2D vector into a 1D vector. This is necessary because the search
+        // function of the Table trait expects a 1D vector as input. However, the
+        // create_embeddings function returns a 2D vector (a vector of embeddings,
+        // where each embedding is itself a vector)
+        let query: Vec<f32> = query
+            .into_iter()
+            .flat_map(|embedding| embedding.to_vec())
+            .collect();
+        let table = self
+            .get_or_create_table(TABLE_NAME)
+            .await
+            .expect("Failed to create table");
+        Ok(table
+            .search(&query)
+            .metric_type(MetricType::L2) // this is the default
+            .limit(2)
+            .execute_stream()
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?)
     }
 
-    pub fn update(&self) {
-        println!("Updating embeddings");
+    pub async fn delete<T: std::fmt::Display>(&self, id: T) {
+        let table = self
+            .get_or_create_table(TABLE_NAME)
+            .await
+            .expect("Failed to create table");
+        table
+            .delete(format!("id > {id}").as_str())
+            .await
+            .expect("Failed to delete table");
+    }
+
+    pub async fn update(&self, new_data: Vec<RecordBatch>) {
+        todo!("Look at the docs for Table.merge_insert and implement this method.");
+        // let table = self
+        //     .get_or_create_table(TABLE_NAME)
+        //     .await
+        //     .expect("Failed to create table");
+        // let mut merge_insert = table.merge_insert(&["id"]);
+        // merge_insert
+        //     .when_matched_update_all(None)
+        //     .when_not_matched_insert_all();
+        // merge_insert.execute(Box::new(new_data)).await.unwrap();
     }
 
     async fn init_db_conn() -> lancedb::Result<Connection> {
@@ -140,11 +201,7 @@ impl EmbedStore {
         schema
     }
 
-    async fn get_or_create_table(
-        &self,
-        table_name: &str,
-        dimensions_count: usize,
-    ) -> lancedb::Result<TableRef> {
+    async fn get_or_create_table(&self, table_name: &str) -> lancedb::Result<TableRef> {
         let db = self.db_conn.clone();
         let table_names = self.db_conn.table_names().await?;
         let table = table_names.iter().find(|&name| name == table_name);
@@ -155,7 +212,7 @@ impl EmbedStore {
             }
             None => {
                 let table = self
-                    .create_empty_table(table_name, dimensions_count)
+                    .create_empty_table(table_name, EMBEDDING_DIMENSIONS)
                     .await?;
                 Ok(table)
             }
