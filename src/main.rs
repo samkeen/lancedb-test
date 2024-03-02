@@ -81,7 +81,14 @@ async fn main() -> Result<(), lancedb::Error> {
 
     db.add(text_lines).await;
 
-    db.create_index(None).await;
+    db.create_index(None).await.expect("Failed to create index");
+
+    println!(
+        "Number of items in Db: {}",
+        db.record_count()
+            .await
+            .expect("Was unable to get record count")
+    );
 
     if let Ok(search_result) = db
         .search("Call me Ishmael. Some years ago—never mind how long precisely—having")

@@ -2,13 +2,16 @@ use arrow_array::types::Float32Type;
 use arrow_array::{
     ArrayRef, FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator, StringArray,
 };
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{ArrowError, DataType, Field, Schema};
 use fastembed::{Embedding, TextEmbedding};
 use futures::TryStreamExt;
 use lancedb::connection::Connection;
 use lancedb::index::MetricType;
 use lancedb::table::AddDataOptions;
 use lancedb::{connect, Table, TableRef};
+use std::error::Error;
+use std::fmt;
+use std::fmt::Formatter;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -20,6 +23,49 @@ pub struct EmbedStore {
     embedding_model: TextEmbedding,
     db_conn: Connection,
     table: Arc<dyn Table>,
+}
+
+#[derive(Debug)]
+pub enum EmbedStoreError {
+    VectorDbError(lancedb::error::Error),
+    ArrowError(ArrowError),
+    EmbeddingError(anyhow::Error),
+}
+impl fmt::Display for EmbedStoreError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            EmbedStoreError::VectorDbError(e) => write!(f, "{}", e),
+            EmbedStoreError::ArrowError(e) => write!(f, "{}", e),
+            EmbedStoreError::EmbeddingError(e) => write!(f, "{}", e),
+        }
+    }
+}
+impl Error for EmbedStoreError {
+    // Implement this to return the lower level source of this Error.
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            EmbedStoreError::VectorDbError(e) => Some(e),
+            EmbedStoreError::ArrowError(e) => Some(e),
+            EmbedStoreError::EmbeddingError(e) => None,
+        }
+    }
+}
+impl From<lancedb::error::Error> for EmbedStoreError {
+    fn from(e: lancedb::error::Error) -> Self {
+        EmbedStoreError::VectorDbError(e)
+    }
+}
+
+impl From<ArrowError> for EmbedStoreError {
+    fn from(e: ArrowError) -> Self {
+        EmbedStoreError::ArrowError(e)
+    }
+}
+
+impl From<anyhow::Error> for EmbedStoreError {
+    fn from(e: anyhow::Error) -> Self {
+        EmbedStoreError::EmbeddingError(e)
+    }
 }
 
 impl EmbedStore {
@@ -51,6 +97,7 @@ impl EmbedStore {
             .create_record_batch(embeddings, text, schema.clone())
             .into_iter()
             .map(Ok);
+
         let batches = RecordBatchIterator::new(records_iter, schema.clone());
         self.table
             .add(Box::new(batches), AddDataOptions::default())
@@ -68,13 +115,18 @@ impl EmbedStore {
             .await?)
     }
 
-    pub async fn record_count(&self) -> usize {
+    pub async fn record_count(&self) -> Result<usize, EmbedStoreError> {
         self.table
             .count_rows(None)
             .await
-            .expect("Failed to count rows")
+            .map_err(EmbedStoreError::from)
     }
 
+    // @TODO having trouble converting this error
+    // I get `the trait std::convert::From<lance_core::error::Error> is not implemented for db::EmbedStoreError`
+    // BUT if I add it, I get an error stating EmbedStoreError has `lance_core::Error` implemented but not `lance_core::error::Error`
+    // Oddly, `Error` is directly under core_lance (in `error.rs`)
+    // Maybe try the republish module under a different namespace trick???
     pub async fn search(&self, search_text: &str) -> lancedb::Result<Vec<RecordBatch>> {
         let query = self
             .create_embeddings(&[search_text.to_string()])
@@ -98,11 +150,9 @@ impl EmbedStore {
             .await?)
     }
 
-    pub async fn delete<T: std::fmt::Display>(&self, id: T) {
-        self.table
-            .delete(format!("id > {id}").as_str())
-            .await
-            .expect("Failed to delete table");
+    pub async fn delete<T: std::fmt::Display>(&self, id: T) -> lancedb::error::Result<()> {
+        self.table.delete(format!("id > {id}").as_str()).await
+        // .expect("Failed to delete table");
     }
 
     pub async fn update(&self, new_data: Vec<RecordBatch>) {
@@ -126,7 +176,8 @@ impl EmbedStore {
 
     fn drop_data_dir() {
         if Path::new(DB_DIR).exists() {
-            std::fs::remove_dir_all(DB_DIR).unwrap();
+            std::fs::remove_dir_all(DB_DIR)
+                .expect(format!("Unable failed to drop db dir: {DB_DIR}").as_str());
         }
     }
 
@@ -173,7 +224,7 @@ impl EmbedStore {
         let total_records_count = embeddings.len();
         let dimensions_count = embeddings[0].len();
         let wrapped_source = self.wrap_in_option(embeddings);
-        vec![RecordBatch::try_new(
+        let record_batch = RecordBatch::try_new(
             schema.clone(),
             vec![
                 // id field
@@ -188,8 +239,15 @@ impl EmbedStore {
                 // Text field
                 Arc::new(Arc::new(StringArray::from(text)) as ArrayRef),
             ],
-        )
-        .unwrap()]
+        );
+        match record_batch {
+            Ok(batch) => {
+                vec![batch]
+            }
+            Err(e) => {
+                panic!("Was unable to create a record batch: {}", e)
+            }
+        }
     }
 
     fn generate_schema(dimensions_count: usize) -> Arc<Schema> {
@@ -246,7 +304,7 @@ impl EmbedStore {
     }
 
     /// Creates an index on a given field.
-    pub async fn create_index(&self, num_partitions: Option<u32>) {
+    pub async fn create_index(&self, num_partitions: Option<u32>) -> lancedb::error::Result<()> {
         let num_partitions = num_partitions.unwrap_or(8);
         self.table
             .create_index(&["embeddings"])
@@ -254,6 +312,5 @@ impl EmbedStore {
             .num_partitions(num_partitions)
             .build()
             .await
-            .expect("Failed to create index")
     }
 }
