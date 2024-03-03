@@ -12,7 +12,6 @@ use lancedb::{connect, Table, TableRef};
 use std::error::Error;
 use std::fmt;
 use std::fmt::Formatter;
-use std::path::Path;
 use std::sync::Arc;
 
 const DB_DIR: &str = "data";
@@ -46,7 +45,7 @@ impl Error for EmbedStoreError {
         match self {
             EmbedStoreError::VectorDbError(e) => Some(e),
             EmbedStoreError::ArrowError(e) => Some(e),
-            EmbedStoreError::EmbeddingError(e) => None,
+            EmbedStoreError::EmbeddingError(_) => None,
         }
     }
 }
@@ -69,30 +68,24 @@ impl From<anyhow::Error> for EmbedStoreError {
 }
 
 impl EmbedStore {
-    pub async fn new(embedding_model: TextEmbedding) -> EmbedStore {
-        let db_conn = Self::init_db_conn()
-            .await
-            .expect("Failed to initialize database");
-        let table = Self::get_or_create_table(&db_conn, TABLE_NAME)
-            .await
-            .expect("Failed to create table");
-        EmbedStore {
+    pub async fn new(embedding_model: TextEmbedding) -> Result<EmbedStore, EmbedStoreError> {
+        let db_conn = Self::init_db_conn().await?;
+        let table = Self::get_or_create_table(&db_conn, TABLE_NAME).await?;
+        Ok(EmbedStore {
             embedding_model,
             db_conn,
             table,
-        }
+        })
     }
 
-    pub async fn add(&self, text: Vec<String>) {
-        let embeddings = self
-            .create_embeddings(&text)
-            .expect("Failed to create embeddings");
+    pub async fn add(&self, text: Vec<String>) -> Result<(), EmbedStoreError> {
+        let embeddings = self.create_embeddings(&text)?;
         assert_eq!(
             embeddings[0].len(),
             EMBEDDING_DIMENSIONS,
             "Embedding dimensions mismatch"
         );
-        let schema = self.table.schema().await.expect("Failed to get schema");
+        let schema = self.table.schema().await?;
         let records_iter = self
             .create_record_batch(embeddings, text, schema.clone())
             .into_iter()
@@ -102,17 +95,7 @@ impl EmbedStore {
         self.table
             .add(Box::new(batches), AddDataOptions::default())
             .await
-            .expect("Failed adding data to table");
-    }
-
-    pub async fn get_all(&self) -> lancedb::Result<Vec<RecordBatch>> {
-        Ok(self
-            .table
-            .query()
-            .execute_stream()
-            .await?
-            .try_collect::<Vec<_>>()
-            .await?)
+            .map_err(EmbedStoreError::from)
     }
 
     pub async fn record_count(&self) -> Result<usize, EmbedStoreError> {
@@ -127,6 +110,7 @@ impl EmbedStore {
     // BUT if I add it, I get an error stating EmbedStoreError has `lance_core::Error` implemented but not `lance_core::error::Error`
     // Oddly, `Error` is directly under core_lance (in `error.rs`)
     // Maybe try the republish module under a different namespace trick???
+    // NOTE: I'll have the same issue with get_all() below
     pub async fn search(&self, search_text: &str) -> lancedb::Result<Vec<RecordBatch>> {
         let query = self
             .create_embeddings(&[search_text.to_string()])
@@ -150,12 +134,24 @@ impl EmbedStore {
             .await?)
     }
 
-    pub async fn delete<T: std::fmt::Display>(&self, id: T) -> lancedb::error::Result<()> {
-        self.table.delete(format!("id > {id}").as_str()).await
-        // .expect("Failed to delete table");
+    pub async fn get_all(&self) -> lancedb::Result<Vec<RecordBatch>> {
+        Ok(self
+            .table
+            .query()
+            .execute_stream()
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?)
     }
 
-    pub async fn update(&self, new_data: Vec<RecordBatch>) {
+    pub async fn delete<T: std::fmt::Display>(&self, id: T) -> Result<(), EmbedStoreError> {
+        self.table
+            .delete(format!("id > {id}").as_str())
+            .await
+            .map_err(EmbedStoreError::from)
+    }
+
+    pub async fn update(&self, _new_data: Vec<RecordBatch>) -> Result<(), EmbedStoreError> {
         todo!("Look at the docs for Table.merge_insert and implement this method.");
         // let table = self
         //     .get_or_create_table(TABLE_NAME)
@@ -168,21 +164,16 @@ impl EmbedStore {
         // merge_insert.execute(Box::new(new_data)).await.unwrap();
     }
 
-    async fn init_db_conn() -> lancedb::Result<Connection> {
+    async fn init_db_conn() -> Result<Connection, EmbedStoreError> {
         let db_path = format!("{}/{}", DB_DIR, DB_NAME);
         let db_conn = connect(db_path.as_str()).execute().await?;
         Ok(db_conn)
     }
 
-    fn drop_data_dir() {
-        if Path::new(DB_DIR).exists() {
-            std::fs::remove_dir_all(DB_DIR)
-                .expect(format!("Unable failed to drop db dir: {DB_DIR}").as_str());
-        }
-    }
-
-    fn create_embeddings(&self, documents: &[String]) -> anyhow::Result<Vec<Embedding>> {
-        self.embedding_model.embed(documents.to_vec(), None)
+    fn create_embeddings(&self, documents: &[String]) -> Result<Vec<Embedding>, EmbedStoreError> {
+        self.embedding_model
+            .embed(documents.to_vec(), None)
+            .map_err(EmbedStoreError::from)
     }
 
     /// Transforms a 2D vector into a 2D vector where each element is wrapped in an `Option`.
@@ -251,7 +242,7 @@ impl EmbedStore {
     }
 
     fn generate_schema(dimensions_count: usize) -> Arc<Schema> {
-        let schema = Arc::new(Schema::new(vec![
+        Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
             Field::new(
                 "embeddings",
@@ -262,8 +253,7 @@ impl EmbedStore {
                 true,
             ),
             Field::new("text", DataType::Utf8, false),
-        ]));
-        schema
+        ]))
     }
 
     async fn get_or_create_table(
@@ -304,7 +294,7 @@ impl EmbedStore {
     }
 
     /// Creates an index on a given field.
-    pub async fn create_index(&self, num_partitions: Option<u32>) -> lancedb::error::Result<()> {
+    pub async fn create_index(&self, num_partitions: Option<u32>) -> Result<(), EmbedStoreError> {
         let num_partitions = num_partitions.unwrap_or(8);
         self.table
             .create_index(&["embeddings"])
@@ -312,5 +302,6 @@ impl EmbedStore {
             .num_partitions(num_partitions)
             .build()
             .await
+            .map_err(EmbedStoreError::from)
     }
 }

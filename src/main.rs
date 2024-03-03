@@ -73,22 +73,33 @@ async fn main() -> Result<(), lancedb::Error> {
         show_download_progress: true,
         ..Default::default()
     })
-    .expect("Unable to create embedding model");
-    let db = EmbedStore::new(embedding_model).await;
+    .map_err(|e| format!("Failed creating Embedding Model: {}", e))
+    .unwrap();
+    let db = EmbedStore::new(embedding_model)
+        .await
+        .map_err(|e| format!("Failed to create EmbedStore: {}", e))
+        .unwrap();
 
     let text_lines = read_file_and_split_lines("tests/fixtures/mobi-dick.txt", 1000)
-        .expect("Unable to read test file");
+        .map_err(|e| format!("Unable to read test file: {}", e))
+        .unwrap();
 
-    db.add(text_lines).await;
+    db.add(text_lines)
+        .await
+        .map_err(|e| format!("Failed adding text to Embed store: {}", e))
+        .unwrap();
 
-    db.create_index(None).await.expect("Failed to create index");
+    db.create_index(None)
+        .await
+        .map_err(|e| format!("Failed creating index for embed store: {}", e))
+        .unwrap();
 
-    println!(
-        "Number of items in Db: {}",
-        db.record_count()
-            .await
-            .expect("Was unable to get record count")
-    );
+    let record_count = db
+        .record_count()
+        .await
+        .map_err(|e| format!("Failed to retrieve record count: {}", e))
+        .unwrap();
+    println!("Number of items in Db: {record_count}");
 
     if let Ok(search_result) = db
         .search("Call me Ishmael. Some years ago—never mind how long precisely—having")
@@ -124,7 +135,7 @@ async fn main() -> Result<(), lancedb::Error> {
 /// Initializes the database.
 async fn reset_db() -> lancedb::Result<Connection> {
     if Path::new("data").exists() {
-        std::fs::remove_dir_all("data").unwrap();
+        fs::remove_dir_all("data").unwrap();
     }
     let db = connect("data/sample-lancedb").execute().await?;
     Ok(db)
