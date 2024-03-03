@@ -4,6 +4,8 @@ use db::EmbedStore;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lancedb::connect;
 use lancedb::connection::Connection;
+use rand::distributions::Alphanumeric;
+use rand::Rng;
 use std::path::Path;
 use std::{fs, io};
 
@@ -78,24 +80,31 @@ async fn main() -> Result<(), lancedb::Error> {
     let db = EmbedStore::new(embedding_model).await.unwrap();
 
     let text_lines = read_file_and_split_lines("tests/fixtures/mobi-dick.txt", 1000).unwrap();
-
-    db.add(text_lines).await.unwrap();
+    let alt_ids: Vec<String> = (1..=1000).map(|_| generate_id()).collect();
+    let id = alt_ids[42].clone();
+    db.add(text_lines, alt_ids).await.unwrap();
 
     db.create_index(None).await.unwrap();
 
-    // get record at id=42
-    let id = 42;
+    // FOUND example
+    let record = db.get(&id).await.unwrap();
+    match record {
+        None => {
+            println!("The record with id: {id} was not found")
+        }
+        Some(record) => {
+            println!("Found record[{}]: '{:?}'", id, record.column_by_name("id"))
+        }
+    }
+    // NOT FOUND example
+    let id = "abc";
     let record = db.get(id).await.unwrap();
     match record {
         None => {
             println!("The record with id: {id} was not found")
         }
         Some(record) => {
-            println!(
-                "Found record[{}]: '{:?}'",
-                id,
-                record.column_by_name("text")
-            )
+            println!("Found record[{}]: '{:?}'", id, record.column_by_name("id"))
         }
     }
 
@@ -134,6 +143,16 @@ async fn main() -> Result<(), lancedb::Error> {
         }
     }
     Ok(())
+}
+
+fn generate_id() -> String {
+    let mut rng = rand::thread_rng();
+    let id: String = std::iter::repeat(())
+        .map(|()| rng.sample(Alphanumeric))
+        .map(char::from)
+        .take(6)
+        .collect();
+    id
 }
 
 /// Initializes the database.

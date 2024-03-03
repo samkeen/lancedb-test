@@ -78,7 +78,11 @@ impl EmbedStore {
         })
     }
 
-    pub async fn add(&self, text: Vec<String>) -> Result<(), EmbedStoreError> {
+    pub async fn add(
+        &self,
+        text: Vec<String>,
+        alt_ids: Vec<String>,
+    ) -> Result<(), EmbedStoreError> {
         let embeddings = self.create_embeddings(&text)?;
         assert_eq!(
             embeddings[0].len(),
@@ -87,7 +91,7 @@ impl EmbedStore {
         );
         let schema = self.table.schema().await?;
         let records_iter = self
-            .create_record_batch(embeddings, text, schema.clone())
+            .create_record_batch(embeddings, text, alt_ids, schema.clone())
             .into_iter()
             .map(Ok);
 
@@ -106,9 +110,7 @@ impl EmbedStore {
     }
 
     pub async fn search(&self, search_text: &str) -> Result<Vec<RecordBatch>, EmbedStoreError> {
-        let query = self
-            .create_embeddings(&[search_text.to_string()])
-            .expect("Failed to compute embeddings for query string");
+        let query = self.create_embeddings(&[search_text.to_string()])?;
         // flattening a 2D vector into a 1D vector. This is necessary because the search
         // function of the Table trait expects a 1D vector as input. However, the
         // create_embeddings function returns a 2D vector (a vector of embeddings,
@@ -137,8 +139,8 @@ impl EmbedStore {
             )),
         }
     }
-    pub async fn get(&self, id: u32) -> Result<Option<RecordBatch>, EmbedStoreError> {
-        let filter = format!("id = {}", id);
+    pub async fn get(&self, id: &str) -> Result<Option<RecordBatch>, EmbedStoreError> {
+        let filter = format!("id = '{}'", id);
         let stream = self.table.query().filter(filter).execute_stream().await?;
         // @TODO having trouble converting this error
         // I get `the trait std::convert::From<lance_core::error::Error> is not implemented for db::EmbedStoreError`
@@ -185,26 +187,26 @@ impl EmbedStore {
 
     pub async fn update(&self, id: u32, text: Vec<String>) -> Result<(), EmbedStoreError> {
         todo!("Since for any change we need re re-compute embeddings, Convert this it Drop if exists, then recreate");
-        let embeddings = self.create_embeddings(&text)?;
-        assert_eq!(
-            embeddings[0].len(),
-            EMBEDDING_DIMENSIONS,
-            "Embedding dimensions mismatch"
-        );
-        let schema = self.table.schema().await?;
-        let records_iter = self
-            .create_record_batch(embeddings, text, schema.clone())
-            .into_iter()
-            .map(Ok);
-        let batches = RecordBatchIterator::new(records_iter, schema.clone());
-        let mut merge_insert = self.table.merge_insert(&["id"]);
-        merge_insert
-            .when_matched_update_all(None)
-            .when_not_matched_insert_all();
-        merge_insert
-            .execute(Box::new(batches))
-            .await
-            .map_err(EmbedStoreError::from)
+        // let embeddings = self.create_embeddings(&text)?;
+        // assert_eq!(
+        //     embeddings[0].len(),
+        //     EMBEDDING_DIMENSIONS,
+        //     "Embedding dimensions mismatch"
+        // );
+        // let schema = self.table.schema().await?;
+        // let records_iter = self
+        //     .create_record_batch(embeddings, text, schema.clone())
+        //     .into_iter()
+        //     .map(Ok);
+        // let batches = RecordBatchIterator::new(records_iter, schema.clone());
+        // let mut merge_insert = self.table.merge_insert(&["id"]);
+        // merge_insert
+        //     .when_matched_update_all(None)
+        //     .when_not_matched_insert_all();
+        // merge_insert
+        //     .execute(Box::new(batches))
+        //     .await
+        //     .map_err(EmbedStoreError::from)
     }
 
     async fn init_db_conn() -> Result<Connection, EmbedStoreError> {
@@ -253,6 +255,7 @@ impl EmbedStore {
         &self,
         embeddings: Vec<Vec<f32>>,
         text: Vec<String>,
+        alt_ids: Vec<String>,
         schema: Arc<Schema>,
     ) -> Vec<RecordBatch> {
         let total_records_count = embeddings.len();
@@ -262,7 +265,7 @@ impl EmbedStore {
             schema.clone(),
             vec![
                 // id field
-                Arc::new(Int32Array::from_iter_values(0..total_records_count as i32)),
+                // Arc::new(Int32Array::from_iter_values(0..total_records_count as i32)),
                 // Embeddings field
                 Arc::new(
                     FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
@@ -272,6 +275,8 @@ impl EmbedStore {
                 ),
                 // Text field
                 Arc::new(Arc::new(StringArray::from(text)) as ArrayRef),
+                // Alt Id
+                Arc::new(Arc::new(StringArray::from(alt_ids)) as ArrayRef),
             ],
         );
         match record_batch {
@@ -286,7 +291,7 @@ impl EmbedStore {
 
     fn generate_schema(dimensions_count: usize) -> Arc<Schema> {
         Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
+            // Field::new("id", DataType::Int32, false),
             Field::new(
                 "embeddings",
                 DataType::FixedSizeList(
@@ -296,6 +301,7 @@ impl EmbedStore {
                 true,
             ),
             Field::new("text", DataType::Utf8, false),
+            Field::new("id", DataType::Utf8, false),
         ]))
     }
 
