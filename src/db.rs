@@ -105,13 +105,7 @@ impl EmbedStore {
             .map_err(EmbedStoreError::from)
     }
 
-    // @TODO having trouble converting this error
-    // I get `the trait std::convert::From<lance_core::error::Error> is not implemented for db::EmbedStoreError`
-    // BUT if I add it, I get an error stating EmbedStoreError has `lance_core::Error` implemented but not `lance_core::error::Error`
-    // Oddly, `Error` is directly under core_lance (in `error.rs`)
-    // Maybe try the republish module under a different namespace trick???
-    // NOTE: I'll have the same issue with get_all() below
-    pub async fn search(&self, search_text: &str) -> lancedb::Result<Vec<RecordBatch>> {
+    pub async fn search(&self, search_text: &str) -> Result<Vec<RecordBatch>, EmbedStoreError> {
         let query = self
             .create_embeddings(&[search_text.to_string()])
             .expect("Failed to compute embeddings for query string");
@@ -123,45 +117,94 @@ impl EmbedStore {
             .into_iter()
             .flat_map(|embedding| embedding.to_vec())
             .collect();
-        Ok(self
+        let stream = self
             .table
             .search(&query)
             .metric_type(MetricType::L2) // this is the default
             .limit(2)
             .execute_stream()
-            .await?
-            .try_collect::<Vec<_>>()
-            .await?)
+            .await?;
+        // @TODO having trouble converting this error
+        // I get `the trait std::convert::From<lance_core::error::Error> is not implemented for db::EmbedStoreError`
+        // BUT if I add it, I get an error stating EmbedStoreError has `lance_core::Error` implemented but not `lance_core::error::Error`
+        // Oddly, `Error` is directly under core_lance (in `error.rs`)
+        match stream.try_collect::<Vec<_>>().await {
+            Ok(result) => Ok(result),
+            Err(e) => Err(EmbedStoreError::VectorDbError(
+                lancedb::error::Error::Runtime {
+                    message: e.to_string(),
+                },
+            )),
+        }
+    }
+    pub async fn get(&self, id: u32) -> Result<Option<RecordBatch>, EmbedStoreError> {
+        let filter = format!("id = {}", id);
+        let stream = self.table.query().filter(filter).execute_stream().await?;
+        // @TODO having trouble converting this error
+        // I get `the trait std::convert::From<lance_core::error::Error> is not implemented for db::EmbedStoreError`
+        // BUT if I add it, I get an error stating EmbedStoreError has `lance_core::Error` implemented but not `lance_core::error::Error`
+        // Oddly, `Error` is directly under core_lance (in `error.rs`)
+        match stream.try_collect::<Vec<_>>().await {
+            Ok(mut result) => {
+                assert!(
+                    result.len() <= 1,
+                    "The get by id method should only return one item at most"
+                );
+                Ok(result.pop())
+            }
+            Err(e) => Err(EmbedStoreError::VectorDbError(
+                lancedb::error::Error::Runtime {
+                    message: e.to_string(),
+                },
+            )),
+        }
     }
 
-    pub async fn get_all(&self) -> lancedb::Result<Vec<RecordBatch>> {
-        Ok(self
-            .table
-            .query()
-            .execute_stream()
-            .await?
-            .try_collect::<Vec<_>>()
-            .await?)
+    pub async fn get_all(&self) -> Result<Vec<RecordBatch>, EmbedStoreError> {
+        let stream = self.table.query().execute_stream().await?;
+        // @TODO having trouble converting this error
+        // I get `the trait std::convert::From<lance_core::error::Error> is not implemented for db::EmbedStoreError`
+        // BUT if I add it, I get an error stating EmbedStoreError has `lance_core::Error` implemented but not `lance_core::error::Error`
+        // Oddly, `Error` is directly under core_lance (in `error.rs`)
+        match stream.try_collect::<Vec<_>>().await {
+            Ok(result) => Ok(result),
+            Err(e) => Err(EmbedStoreError::VectorDbError(
+                lancedb::error::Error::Runtime {
+                    message: e.to_string(),
+                },
+            )),
+        }
     }
 
-    pub async fn delete<T: std::fmt::Display>(&self, id: T) -> Result<(), EmbedStoreError> {
+    pub async fn delete<T: fmt::Display>(&self, id: T) -> Result<(), EmbedStoreError> {
         self.table
             .delete(format!("id > {id}").as_str())
             .await
             .map_err(EmbedStoreError::from)
     }
 
-    pub async fn update(&self, _new_data: Vec<RecordBatch>) -> Result<(), EmbedStoreError> {
-        todo!("Look at the docs for Table.merge_insert and implement this method.");
-        // let table = self
-        //     .get_or_create_table(TABLE_NAME)
-        //     .await
-        //     .expect("Failed to create table");
-        // let mut merge_insert = table.merge_insert(&["id"]);
-        // merge_insert
-        //     .when_matched_update_all(None)
-        //     .when_not_matched_insert_all();
-        // merge_insert.execute(Box::new(new_data)).await.unwrap();
+    pub async fn update(&self, id: u32, text: Vec<String>) -> Result<(), EmbedStoreError> {
+        todo!("Since for any change we need re re-compute embeddings, Convert this it Drop if exists, then recreate");
+        let embeddings = self.create_embeddings(&text)?;
+        assert_eq!(
+            embeddings[0].len(),
+            EMBEDDING_DIMENSIONS,
+            "Embedding dimensions mismatch"
+        );
+        let schema = self.table.schema().await?;
+        let records_iter = self
+            .create_record_batch(embeddings, text, schema.clone())
+            .into_iter()
+            .map(Ok);
+        let batches = RecordBatchIterator::new(records_iter, schema.clone());
+        let mut merge_insert = self.table.merge_insert(&["id"]);
+        merge_insert
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all();
+        merge_insert
+            .execute(Box::new(batches))
+            .await
+            .map_err(EmbedStoreError::from)
     }
 
     async fn init_db_conn() -> Result<Connection, EmbedStoreError> {

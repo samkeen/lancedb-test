@@ -73,32 +73,36 @@ async fn main() -> Result<(), lancedb::Error> {
         show_download_progress: true,
         ..Default::default()
     })
-    .map_err(|e| format!("Failed creating Embedding Model: {}", e))
     .unwrap();
-    let db = EmbedStore::new(embedding_model)
-        .await
-        .map_err(|e| format!("Failed to create EmbedStore: {}", e))
-        .unwrap();
 
-    let text_lines = read_file_and_split_lines("tests/fixtures/mobi-dick.txt", 1000)
-        .map_err(|e| format!("Unable to read test file: {}", e))
-        .unwrap();
+    let db = EmbedStore::new(embedding_model).await.unwrap();
 
-    db.add(text_lines)
-        .await
-        .map_err(|e| format!("Failed adding text to Embed store: {}", e))
-        .unwrap();
+    let text_lines = read_file_and_split_lines("tests/fixtures/mobi-dick.txt", 1000).unwrap();
 
-    db.create_index(None)
-        .await
-        .map_err(|e| format!("Failed creating index for embed store: {}", e))
-        .unwrap();
+    db.add(text_lines).await.unwrap();
 
-    let record_count = db
-        .record_count()
-        .await
-        .map_err(|e| format!("Failed to retrieve record count: {}", e))
-        .unwrap();
+    db.create_index(None).await.unwrap();
+
+    // get record at id=42
+    let id = 42;
+    let record = db.get(id).await.unwrap();
+    match record {
+        None => {
+            println!("The record with id: {id} was not found")
+        }
+        Some(record) => {
+            println!(
+                "Found record[{}]: '{:?}'",
+                id,
+                record.column_by_name("text")
+            )
+        }
+    }
+
+    // update record 42
+    // db.update()
+
+    let record_count = db.record_count().await.unwrap();
     println!("Number of items in Db: {record_count}");
 
     if let Ok(search_result) = db
