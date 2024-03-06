@@ -1,7 +1,5 @@
 use arrow_array::types::Float32Type;
-use arrow_array::{
-    ArrayRef, FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator, StringArray,
-};
+use arrow_array::{ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{ArrowError, DataType, Field, Schema};
 use fastembed::{Embedding, TextEmbedding};
 use futures::TryStreamExt;
@@ -18,6 +16,14 @@ const DB_DIR: &str = "data";
 const DB_NAME: &str = "sample-lancedb";
 const TABLE_NAME: &str = "documents";
 const EMBEDDING_DIMENSIONS: usize = 384;
+const COLUMN_ID: &str = "id";
+const COLUMN_EMBEDDINGS: &str = "embeddings";
+const COLUMN_TEXT: &str = "text";
+
+pub struct Document {
+    pub id: String,
+    pub text: String,
+}
 pub struct EmbedStore {
     embedding_model: TextEmbedding,
     db_conn: Connection,
@@ -26,16 +32,16 @@ pub struct EmbedStore {
 
 #[derive(Debug)]
 pub enum EmbedStoreError {
-    VectorDbError(lancedb::error::Error),
-    ArrowError(ArrowError),
-    EmbeddingError(anyhow::Error),
+    VectorDb(lancedb::error::Error),
+    Arrow(ArrowError),
+    Embedding(anyhow::Error),
 }
 impl fmt::Display for EmbedStoreError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            EmbedStoreError::VectorDbError(e) => write!(f, "{}", e),
-            EmbedStoreError::ArrowError(e) => write!(f, "{}", e),
-            EmbedStoreError::EmbeddingError(e) => write!(f, "{}", e),
+            EmbedStoreError::VectorDb(e) => write!(f, "{}", e),
+            EmbedStoreError::Arrow(e) => write!(f, "{}", e),
+            EmbedStoreError::Embedding(e) => write!(f, "{}", e),
         }
     }
 }
@@ -43,27 +49,27 @@ impl Error for EmbedStoreError {
     // Implement this to return the lower level source of this Error.
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            EmbedStoreError::VectorDbError(e) => Some(e),
-            EmbedStoreError::ArrowError(e) => Some(e),
-            EmbedStoreError::EmbeddingError(_) => None,
+            EmbedStoreError::VectorDb(e) => Some(e),
+            EmbedStoreError::Arrow(e) => Some(e),
+            EmbedStoreError::Embedding(_) => None,
         }
     }
 }
 impl From<lancedb::error::Error> for EmbedStoreError {
     fn from(e: lancedb::error::Error) -> Self {
-        EmbedStoreError::VectorDbError(e)
+        EmbedStoreError::VectorDb(e)
     }
 }
 
 impl From<ArrowError> for EmbedStoreError {
     fn from(e: ArrowError) -> Self {
-        EmbedStoreError::ArrowError(e)
+        EmbedStoreError::Arrow(e)
     }
 }
 
 impl From<anyhow::Error> for EmbedStoreError {
     fn from(e: anyhow::Error) -> Self {
-        EmbedStoreError::EmbeddingError(e)
+        EmbedStoreError::Embedding(e)
     }
 }
 
@@ -109,7 +115,12 @@ impl EmbedStore {
             .map_err(EmbedStoreError::from)
     }
 
-    pub async fn search(&self, search_text: &str) -> Result<Vec<RecordBatch>, EmbedStoreError> {
+    pub async fn search(
+        &self,
+        search_text: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<Document>, EmbedStoreError> {
+        let limit = limit.unwrap_or(25);
         let query = self.create_embeddings(&[search_text.to_string()])?;
         // flattening a 2D vector into a 1D vector. This is necessary because the search
         // function of the Table trait expects a 1D vector as input. However, the
@@ -119,63 +130,49 @@ impl EmbedStore {
             .into_iter()
             .flat_map(|embedding| embedding.to_vec())
             .collect();
-        let stream = self
-            .table
-            .search(&query)
-            .metric_type(MetricType::L2) // this is the default
-            .limit(2)
-            .execute_stream()
-            .await?;
-        // @TODO having trouble converting this error
-        // I get `the trait std::convert::From<lance_core::error::Error> is not implemented for db::EmbedStoreError`
-        // BUT if I add it, I get an error stating EmbedStoreError has `lance_core::Error` implemented but not `lance_core::error::Error`
-        // Oddly, `Error` is directly under core_lance (in `error.rs`)
-        match stream.try_collect::<Vec<_>>().await {
-            Ok(result) => Ok(result),
-            Err(e) => Err(EmbedStoreError::VectorDbError(
-                lancedb::error::Error::Runtime {
-                    message: e.to_string(),
-                },
-            )),
-        }
-    }
-    pub async fn get(&self, id: &str) -> Result<Option<RecordBatch>, EmbedStoreError> {
-        let filter = format!("id = '{}'", id);
-        let stream = self.table.query().filter(filter).execute_stream().await?;
-        // @TODO having trouble converting this error
-        // I get `the trait std::convert::From<lance_core::error::Error> is not implemented for db::EmbedStoreError`
-        // BUT if I add it, I get an error stating EmbedStoreError has `lance_core::Error` implemented but not `lance_core::error::Error`
-        // Oddly, `Error` is directly under core_lance (in `error.rs`)
-        match stream.try_collect::<Vec<_>>().await {
-            Ok(mut result) => {
-                assert!(
-                    result.len() <= 1,
-                    "The get by id method should only return one item at most"
-                );
-                Ok(result.pop())
-            }
-            Err(e) => Err(EmbedStoreError::VectorDbError(
-                lancedb::error::Error::Runtime {
-                    message: e.to_string(),
-                },
-            )),
-        }
+        self.execute_query(Some(query), None, Some(limit)).await
     }
 
-    pub async fn get_all(&self) -> Result<Vec<RecordBatch>, EmbedStoreError> {
-        let stream = self.table.query().execute_stream().await?;
+    async fn execute_query(
+        &self,
+        query: Option<Vec<f32>>,
+        filter: Option<String>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Document>, EmbedStoreError> {
+        let limit = limit.unwrap_or(10);
+        let mut query_builder = self.table.query().limit(limit);
+        if let Some(query_values) = query {
+            query_builder = query_builder
+                .nearest_to(&query_values)
+                .metric_type(MetricType::L2);
+        }
+        if let Some(filter_clause) = filter {
+            query_builder = query_builder.filter(&filter_clause);
+        }
+        let stream = query_builder.execute_stream().await?;
         // @TODO having trouble converting this error
         // I get `the trait std::convert::From<lance_core::error::Error> is not implemented for db::EmbedStoreError`
         // BUT if I add it, I get an error stating EmbedStoreError has `lance_core::Error` implemented but not `lance_core::error::Error`
         // Oddly, `Error` is directly under core_lance (in `error.rs`)
         match stream.try_collect::<Vec<_>>().await {
-            Ok(result) => Ok(result),
-            Err(e) => Err(EmbedStoreError::VectorDbError(
-                lancedb::error::Error::Runtime {
-                    message: e.to_string(),
-                },
-            )),
+            Ok(result) => Ok(self.record_to_document(result)),
+            Err(e) => Err(EmbedStoreError::VectorDb(lancedb::error::Error::Runtime {
+                message: e.to_string(),
+            })),
         }
+    }
+    pub async fn get(&self, id: &str) -> Result<Option<Document>, EmbedStoreError> {
+        let filter = format!("id = '{}'", id);
+        let mut result = self.execute_query(None, Some(filter), None).await?;
+        assert!(
+            result.len() <= 1,
+            "The get by id method should only return one item at most"
+        );
+        Ok(result.pop())
+    }
+
+    pub async fn get_all(&self) -> Result<Vec<Document>, EmbedStoreError> {
+        self.execute_query(None, None, Some(1000)).await
     }
 
     pub async fn delete<T: fmt::Display>(&self, id: T) -> Result<(), EmbedStoreError> {
@@ -185,28 +182,46 @@ impl EmbedStore {
             .map_err(EmbedStoreError::from)
     }
 
-    pub async fn update(&self, id: u32, text: Vec<String>) -> Result<(), EmbedStoreError> {
-        todo!("Since for any change we need re re-compute embeddings, Convert this it Drop if exists, then recreate");
-        // let embeddings = self.create_embeddings(&text)?;
-        // assert_eq!(
-        //     embeddings[0].len(),
-        //     EMBEDDING_DIMENSIONS,
-        //     "Embedding dimensions mismatch"
-        // );
-        // let schema = self.table.schema().await?;
-        // let records_iter = self
-        //     .create_record_batch(embeddings, text, schema.clone())
-        //     .into_iter()
-        //     .map(Ok);
-        // let batches = RecordBatchIterator::new(records_iter, schema.clone());
-        // let mut merge_insert = self.table.merge_insert(&["id"]);
-        // merge_insert
-        //     .when_matched_update_all(None)
-        //     .when_not_matched_insert_all();
-        // merge_insert
-        //     .execute(Box::new(batches))
-        //     .await
-        //     .map_err(EmbedStoreError::from)
+    pub async fn update(&self, id: &str, text: Vec<String>) -> Result<(), EmbedStoreError> {
+        self.delete(&id).await?;
+        self.add(text, vec![id.to_string()]).await
+    }
+
+    /// Creates an index on a given field.
+    pub async fn create_index(&self, num_partitions: Option<u32>) -> Result<(), EmbedStoreError> {
+        let num_partitions = num_partitions.unwrap_or(8);
+        self.table
+            .create_index(&[COLUMN_EMBEDDINGS])
+            .ivf_pq()
+            .num_partitions(num_partitions)
+            .build()
+            .await
+            .map_err(EmbedStoreError::from)
+    }
+
+    fn record_to_document(&self, record_batch: Vec<RecordBatch>) -> Vec<Document> {
+        let mut documents: Vec<Document> = Vec::new();
+        if record_batch.len() == 0 {
+            return vec![];
+        }
+        let first_record_batch = record_batch.first().expect("There should always be one");
+        let ids = first_record_batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("Failed to downcast");
+        let texts = first_record_batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("Failed to downcast");
+        let _x = first_record_batch.num_rows();
+        (0..first_record_batch.num_rows()).for_each(|index| {
+            let id = ids.value(index).to_string();
+            let text = texts.value(index).to_string();
+            documents.push(Document { id: id, text: text })
+        });
+        documents
     }
 
     async fn init_db_conn() -> Result<Connection, EmbedStoreError> {
@@ -258,7 +273,6 @@ impl EmbedStore {
         alt_ids: Vec<String>,
         schema: Arc<Schema>,
     ) -> Vec<RecordBatch> {
-        let total_records_count = embeddings.len();
         let dimensions_count = embeddings[0].len();
         let wrapped_source = self.wrap_in_option(embeddings);
         let record_batch = RecordBatch::try_new(
@@ -291,17 +305,16 @@ impl EmbedStore {
 
     fn generate_schema(dimensions_count: usize) -> Arc<Schema> {
         Arc::new(Schema::new(vec![
-            // Field::new("id", DataType::Int32, false),
             Field::new(
-                "embeddings",
+                COLUMN_EMBEDDINGS,
                 DataType::FixedSizeList(
                     Arc::new(Field::new("item", DataType::Float32, true)),
                     dimensions_count as i32,
                 ),
                 true,
             ),
-            Field::new("text", DataType::Utf8, false),
-            Field::new("id", DataType::Utf8, false),
+            Field::new(COLUMN_TEXT, DataType::Utf8, false),
+            Field::new(COLUMN_ID, DataType::Utf8, false),
         ]))
     }
 
@@ -340,17 +353,5 @@ impl EmbedStore {
             .create_table(table_name, Box::new(batches))
             .execute()
             .await
-    }
-
-    /// Creates an index on a given field.
-    pub async fn create_index(&self, num_partitions: Option<u32>) -> Result<(), EmbedStoreError> {
-        let num_partitions = num_partitions.unwrap_or(8);
-        self.table
-            .create_index(&["embeddings"])
-            .ivf_pq()
-            .num_partitions(num_partitions)
-            .build()
-            .await
-            .map_err(EmbedStoreError::from)
     }
 }
