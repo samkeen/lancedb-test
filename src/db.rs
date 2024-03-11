@@ -5,8 +5,7 @@ use fastembed::{Embedding, TextEmbedding};
 use futures::TryStreamExt;
 use lancedb::connection::Connection;
 use lancedb::index::MetricType;
-use lancedb::table::AddDataOptions;
-use lancedb::{connect, Table, TableRef};
+use lancedb::{connect, Table};
 use std::error::Error;
 use std::fmt;
 use std::fmt::Formatter;
@@ -27,7 +26,7 @@ pub struct Document {
 pub struct EmbedStore {
     embedding_model: TextEmbedding,
     db_conn: Connection,
-    table: Arc<dyn Table>,
+    table: Table,
 }
 
 #[derive(Debug)]
@@ -103,7 +102,8 @@ impl EmbedStore {
 
         let batches = RecordBatchIterator::new(records_iter, schema.clone());
         self.table
-            .add(Box::new(batches), AddDataOptions::default())
+            .add(Box::new(batches))
+            .execute()
             .await
             .map_err(EmbedStoreError::from)
     }
@@ -318,11 +318,8 @@ impl EmbedStore {
         ]))
     }
 
-    async fn get_or_create_table(
-        db_conn: &Connection,
-        table_name: &str,
-    ) -> lancedb::Result<Arc<dyn Table>> {
-        let table_names = db_conn.table_names().await?;
+    async fn get_or_create_table(db_conn: &Connection, table_name: &str) -> lancedb::Result<Table> {
+        let table_names = db_conn.table_names().execute().await?;
         let table = table_names.iter().find(|&name| name == table_name);
         match table {
             Some(_) => {
@@ -346,7 +343,7 @@ impl EmbedStore {
         &self,
         table_name: &str,
         dimensions_count: usize,
-    ) -> lancedb::Result<TableRef> {
+    ) -> lancedb::Result<Table> {
         let schema = Self::generate_schema(dimensions_count);
         let batches = RecordBatchIterator::new(vec![], schema.clone());
         self.db_conn
