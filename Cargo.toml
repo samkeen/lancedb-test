@@ -6,6 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+log = "0.4.20"
+env_logger = "0.11.2"
 lancedb = "0.4.12"
 tokio = "1.36.0"
 futures = "0.3.30"
@@ -14,3 +16,4 @@ arrow-schema = "50.0.0"
 fastembed = "3.1.1"
 anyhow = "1.0.79"
 rand = "0.8.5"
+serde = { version = "1.0.196", features = ["derive"] }
