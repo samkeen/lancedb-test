@@ -1,10 +1,10 @@
+use crate::db::EmbedStoreError::Runtime;
 use arrow_array::types::Float32Type;
 use arrow_array::{ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{ArrowError, DataType, Field, Schema};
 use fastembed::{Embedding, TextEmbedding};
 use futures::TryStreamExt;
 use lancedb::connection::Connection;
-use lancedb::index::MetricType;
 use lancedb::{connect, Table};
 use serde::Serialize;
 use std::error::Error;
@@ -37,6 +37,7 @@ pub enum EmbedStoreError {
     VectorDb(lancedb::error::Error),
     Arrow(ArrowError),
     Embedding(anyhow::Error),
+    Runtime(String),
 }
 
 impl fmt::Display for EmbedStoreError {
@@ -45,6 +46,7 @@ impl fmt::Display for EmbedStoreError {
             EmbedStoreError::VectorDb(e) => write!(f, "{}", e),
             EmbedStoreError::Arrow(e) => write!(f, "{}", e),
             EmbedStoreError::Embedding(e) => write!(f, "{}", e),
+            Runtime(e) => write!(f, "{}", e),
         }
     }
 }
@@ -56,6 +58,7 @@ impl Error for EmbedStoreError {
             EmbedStoreError::VectorDb(e) => Some(e),
             EmbedStoreError::Arrow(e) => Some(e),
             EmbedStoreError::Embedding(_) => None,
+            Runtime(_) => None,
         }
     }
 }
@@ -147,12 +150,10 @@ impl EmbedStore {
         limit: Option<usize>,
     ) -> Result<Vec<Document>, EmbedStoreError> {
         let limit = limit.unwrap_or(10);
-        let mut query_builder = self.table.query().limit(limit);
-        if let Some(query_values) = query {
-            query_builder = query_builder
-                .nearest_to(&query_values)
-                .metric_type(MetricType::L2);
-        }
+        let mut query_builder = match query {
+            None => self.table.query().limit(limit),
+            Some(search_values) => self.table.search(&search_values).limit(limit),
+        };
         if let Some(filter_clause) = filter {
             query_builder = query_builder.filter(&filter_clause);
         }
@@ -161,13 +162,15 @@ impl EmbedStore {
         // I get `the trait std::convert::From<lance_core::error::Error> is not implemented for db::EmbedStoreError`
         // BUT if I add it, I get an error stating EmbedStoreError has `lance_core::Error` implemented but not `lance_core::error::Error`
         // Oddly, `Error` is directly under core_lance (in `error.rs`)
+
         match stream.try_collect::<Vec<_>>().await {
-            Ok(result) => Ok(self.record_to_document(result)),
+            Ok(result) => Ok(self.record_to_document(result)?),
             Err(e) => Err(EmbedStoreError::VectorDb(lancedb::error::Error::Runtime {
                 message: e.to_string(),
             })),
         }
     }
+
     pub async fn get(&self, id: &str) -> Result<Option<Document>, EmbedStoreError> {
         let filter = format!("id = '{}'", id);
         let mut result = self.execute_query(None, Some(filter), None).await?;
@@ -213,22 +216,31 @@ impl EmbedStore {
             .map_err(EmbedStoreError::from)
     }
 
-    fn record_to_document(&self, record_batches: Vec<RecordBatch>) -> Vec<Document> {
+    fn record_to_document(
+        &self,
+        record_batches: Vec<RecordBatch>,
+    ) -> Result<Vec<Document>, EmbedStoreError> {
         let mut documents: Vec<Document> = Vec::new();
-        if record_batches.len() == 0 {
-            return vec![];
+        if record_batches.is_empty() {
+            return Ok(vec![]);
         }
         for record_batch in record_batches {
-            let ids = record_batch
-                .column(2)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("Failed to downcast");
-            let texts = record_batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("Failed to downcast");
+            let ids_column = record_batch
+                .column_by_name("id")
+                .ok_or(EmbedStoreError::Runtime(String::from(
+                    "Id Column not found",
+                )))?;
+            let texts_column = record_batch
+                .column_by_name("text")
+                .ok_or(Runtime(String::from("Text column not found")))?;
+
+            let ids = ids_column.as_any().downcast_ref::<StringArray>().ok_or(
+                EmbedStoreError::Runtime(String::from("Failed downcasting ids colum")),
+            )?;
+            let texts = texts_column.as_any().downcast_ref::<StringArray>().ok_or(
+                EmbedStoreError::Runtime(String::from("Failed downcasting text colum")),
+            )?;
+
             (0..record_batch.num_rows()).for_each(|index| {
                 let id = ids.value(index).to_string();
                 let text = texts.value(index).to_string();
@@ -236,7 +248,7 @@ impl EmbedStore {
             });
         }
         log::info!("Converted [{}] batch results to Documents", documents.len());
-        documents
+        Ok(documents)
     }
 
     async fn init_db_conn() -> Result<Connection, EmbedStoreError> {

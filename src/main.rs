@@ -71,11 +71,6 @@ async fn main() -> Result<(), lancedb::Error> {
         println!("results: Document[{}]: '{}'", document.id, document.text);
     });
 
-    // Get ALL records
-    println!("Get All Records...");
-    let (_, total_records) = db.get_all().await.unwrap();
-    println!("Total records from get all: {}", total_records);
-
     Ok(())
 }
 
