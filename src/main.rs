@@ -67,8 +67,11 @@ async fn main() -> Result<(), lancedb::Error> {
         )
         .await
         .unwrap();
-    search_result.iter().for_each(|document| {
-        println!("results: Document[{}]: '{}'", document.id, document.text);
+    search_result.iter().for_each(|result| {
+        println!(
+            "results: Document[{}] <distance:{}>: '{}'",
+            result.0.id, result.1, result.0.text
+        );
     });
 
     Ok(())

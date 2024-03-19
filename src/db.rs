@@ -28,6 +28,12 @@ pub struct Document {
     pub text: String,
 }
 
+impl PartialEq for Document {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
 pub struct EmbedStore {
     embedding_model: TextEmbedding,
     db_conn: Connection,
@@ -131,7 +137,7 @@ impl EmbedStore {
         &self,
         search_text: &str,
         limit: Option<usize>,
-    ) -> Result<Vec<Document>, EmbedStoreError> {
+    ) -> Result<Vec<(Document, f32)>, EmbedStoreError> {
         let limit = limit.unwrap_or(25);
         let query = self.create_embeddings(&[search_text.to_string()])?;
         // flattening a 2D vector into a 1D vector. This is necessary because the search
@@ -142,7 +148,7 @@ impl EmbedStore {
             .into_iter()
             .flat_map(|embedding| embedding.to_vec())
             .collect();
-        self.execute_query(Some(query), None, Some(limit)).await
+        self.execute_search(query, None, Some(limit)).await
     }
 
     async fn execute_search(
@@ -292,6 +298,7 @@ impl EmbedStore {
             "Converted [{}] batch results to Documents",
             docs_with_distance.len()
         );
+
         Ok(docs_with_distance)
     }
 
