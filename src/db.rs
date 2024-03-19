@@ -1,6 +1,8 @@
 use crate::db::EmbedStoreError::Runtime;
 use arrow_array::types::Float32Type;
-use arrow_array::{ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray};
+use arrow_array::{
+    ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, StringArray,
+};
 use arrow_schema::{ArrowError, DataType, Field, Schema};
 use fastembed::{Embedding, TextEmbedding};
 use futures::TryStreamExt;
@@ -143,6 +145,32 @@ impl EmbedStore {
         self.execute_query(Some(query), None, Some(limit)).await
     }
 
+    async fn execute_search(
+        &self,
+        query: Vec<f32>,
+        filter: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<(Document, f32)>, EmbedStoreError> {
+        let limit = limit.unwrap_or(10);
+        let mut query_builder = self.table.search(&query).limit(limit);
+        if let Some(filter_clause) = filter {
+            query_builder = query_builder.filter(filter_clause);
+        }
+
+        let stream = query_builder.execute_stream().await?;
+        let record_batches = match stream.try_collect::<Vec<_>>().await {
+            Ok(batches) => batches,
+            Err(err) => {
+                return Err(EmbedStoreError::VectorDb(lancedb::error::Error::Runtime {
+                    message: err.to_string(),
+                }));
+            }
+        };
+        let documents = self.record_to_document_with_distances(record_batches)?;
+
+        Ok(documents)
+    }
+
     async fn execute_query(
         &self,
         query: Option<Vec<f32>>,
@@ -157,7 +185,6 @@ impl EmbedStore {
         if let Some(filter_clause) = filter {
             query_builder = query_builder.filter(filter_clause);
         }
-        query_builder = query_builder.limit(limit);
 
         let stream = query_builder.execute_stream().await?;
 
@@ -217,6 +244,55 @@ impl EmbedStore {
             .build()
             .await
             .map_err(EmbedStoreError::from)
+    }
+
+    fn record_to_document_with_distances(
+        &self,
+        record_batches: Vec<RecordBatch>,
+    ) -> Result<Vec<(Document, f32)>, EmbedStoreError> {
+        let mut docs_with_distance: Vec<(Document, f32)> = Vec::new();
+        if record_batches.is_empty() {
+            return Ok(vec![]);
+        }
+        for record_batch in record_batches {
+            let ids_column = record_batch
+                .column_by_name("id")
+                .ok_or(EmbedStoreError::Runtime(String::from(
+                    "Id Column not found",
+                )))?;
+            let texts_column = record_batch
+                .column_by_name("text")
+                .ok_or(Runtime(String::from("Text column not found")))?;
+
+            let distances_column = record_batch
+                .column_by_name("_distance")
+                .ok_or(Runtime(String::from("_distance column not found")))?;
+
+            let ids = ids_column.as_any().downcast_ref::<StringArray>().ok_or(
+                EmbedStoreError::Runtime(String::from("Failed downcasting ids colum")),
+            )?;
+            let texts = texts_column.as_any().downcast_ref::<StringArray>().ok_or(
+                EmbedStoreError::Runtime(String::from("Failed downcasting text colum")),
+            )?;
+            let distances = distances_column
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or(EmbedStoreError::Runtime(String::from(
+                    "Failed downcasting _distance colum",
+                )))?;
+
+            (0..record_batch.num_rows()).for_each(|index| {
+                let id = ids.value(index).to_string();
+                let text = texts.value(index).to_string();
+                let distance = distances.value(index);
+                docs_with_distance.push((Document { id: id, text: text }, distance))
+            });
+        }
+        log::info!(
+            "Converted [{}] batch results to Documents",
+            docs_with_distance.len()
+        );
+        Ok(docs_with_distance)
     }
 
     fn record_to_document(

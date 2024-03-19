@@ -63,7 +63,7 @@ async fn main() -> Result<(), lancedb::Error> {
     let search_result = db
         .search(
             "Call me Ishmael. Some years ago—never mind how long precisely—having",
-            Some(10),
+            Some(3),
         )
         .await
         .unwrap();
