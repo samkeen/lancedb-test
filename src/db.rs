@@ -146,7 +146,7 @@ impl EmbedStore {
     async fn execute_query(
         &self,
         query: Option<Vec<f32>>,
-        filter: Option<String>,
+        filter: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<Document>, EmbedStoreError> {
         let limit = limit.unwrap_or(10);
@@ -155,25 +155,28 @@ impl EmbedStore {
             Some(search_values) => self.table.search(&search_values).limit(limit),
         };
         if let Some(filter_clause) = filter {
-            query_builder = query_builder.filter(&filter_clause);
+            query_builder = query_builder.filter(filter_clause);
         }
-        let stream = query_builder.execute_stream().await?;
-        // @TODO having trouble converting this error
-        // I get `the trait std::convert::From<lance_core::error::Error> is not implemented for db::EmbedStoreError`
-        // BUT if I add it, I get an error stating EmbedStoreError has `lance_core::Error` implemented but not `lance_core::error::Error`
-        // Oddly, `Error` is directly under core_lance (in `error.rs`)
+        query_builder = query_builder.limit(limit);
 
-        match stream.try_collect::<Vec<_>>().await {
-            Ok(result) => Ok(self.record_to_document(result)?),
-            Err(e) => Err(EmbedStoreError::VectorDb(lancedb::error::Error::Runtime {
-                message: e.to_string(),
-            })),
-        }
+        let stream = query_builder.execute_stream().await?;
+
+        let record_batches = match stream.try_collect::<Vec<_>>().await {
+            Ok(batches) => batches,
+            Err(err) => {
+                return Err(EmbedStoreError::VectorDb(lancedb::error::Error::Runtime {
+                    message: err.to_string(),
+                }));
+            }
+        };
+
+        let documents = self.record_to_document(record_batches)?;
+        Ok(documents)
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<Document>, EmbedStoreError> {
         let filter = format!("id = '{}'", id);
-        let mut result = self.execute_query(None, Some(filter), None).await?;
+        let mut result = self.execute_query(None, Some(&filter), None).await?;
         assert!(
             result.len() <= 1,
             "The get by id method should only return one item at most"
