@@ -102,8 +102,8 @@ impl EmbedStore {
 
     pub async fn add(
         &self,
-        text: Vec<String>,
         alt_ids: Vec<String>,
+        text: Vec<String>,
     ) -> Result<(), EmbedStoreError> {
         log::info!("Saving Documents: {:?}", alt_ids);
         let embeddings = self.create_embeddings(&text)?;
@@ -235,9 +235,9 @@ impl EmbedStore {
             .map_err(EmbedStoreError::from)
     }
 
-    pub async fn update(&self, id: &str, text: Vec<String>) -> Result<(), EmbedStoreError> {
+    pub async fn update(&self, id: &str, text: &str) -> Result<(), EmbedStoreError> {
         self.delete(&id).await?;
-        self.add(text, vec![id.to_string()]).await
+        self.add(vec![id.to_string()], vec![text.to_string()]).await
     }
 
     /// Creates an index on a given field.
@@ -261,31 +261,9 @@ impl EmbedStore {
             return Ok(vec![]);
         }
         for record_batch in record_batches {
-            let ids_column = record_batch
-                .column_by_name("id")
-                .ok_or(EmbedStoreError::Runtime(String::from(
-                    "Id Column not found",
-                )))?;
-            let texts_column = record_batch
-                .column_by_name("text")
-                .ok_or(Runtime(String::from("Text column not found")))?;
-
-            let distances_column = record_batch
-                .column_by_name("_distance")
-                .ok_or(Runtime(String::from("_distance column not found")))?;
-
-            let ids = ids_column.as_any().downcast_ref::<StringArray>().ok_or(
-                EmbedStoreError::Runtime(String::from("Failed downcasting ids colum")),
-            )?;
-            let texts = texts_column.as_any().downcast_ref::<StringArray>().ok_or(
-                EmbedStoreError::Runtime(String::from("Failed downcasting text colum")),
-            )?;
-            let distances = distances_column
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or(EmbedStoreError::Runtime(String::from(
-                    "Failed downcasting _distance colum",
-                )))?;
+            let ids = self.downcast_column::<StringArray>(&record_batch, "id")?;
+            let texts = self.downcast_column::<StringArray>(&record_batch, "text")?;
+            let distances = self.downcast_column::<Float32Array>(&record_batch, "_distance")?;
 
             (0..record_batch.num_rows()).for_each(|index| {
                 let id = ids.value(index).to_string();
@@ -311,21 +289,8 @@ impl EmbedStore {
             return Ok(vec![]);
         }
         for record_batch in record_batches {
-            let ids_column = record_batch
-                .column_by_name("id")
-                .ok_or(EmbedStoreError::Runtime(String::from(
-                    "Id Column not found",
-                )))?;
-            let texts_column = record_batch
-                .column_by_name("text")
-                .ok_or(Runtime(String::from("Text column not found")))?;
-
-            let ids = ids_column.as_any().downcast_ref::<StringArray>().ok_or(
-                EmbedStoreError::Runtime(String::from("Failed downcasting ids colum")),
-            )?;
-            let texts = texts_column.as_any().downcast_ref::<StringArray>().ok_or(
-                EmbedStoreError::Runtime(String::from("Failed downcasting text colum")),
-            )?;
+            let ids = self.downcast_column::<StringArray>(&record_batch, "id")?;
+            let texts = self.downcast_column::<StringArray>(&record_batch, "text")?;
 
             (0..record_batch.num_rows()).for_each(|index| {
                 let id = ids.value(index).to_string();
@@ -467,5 +432,20 @@ impl EmbedStore {
             .create_table(table_name, Box::new(batches))
             .execute()
             .await
+    }
+
+    fn downcast_column<'a, T: std::fmt::Debug + 'static>(
+        &self,
+        record_batch: &'a RecordBatch,
+        column_name: &str,
+    ) -> Result<&'a T, EmbedStoreError> {
+        record_batch
+            .column_by_name(column_name)
+            .ok_or_else(|| EmbedStoreError::Runtime(format!("{} column not found", column_name)))?
+            .as_any()
+            .downcast_ref::<T>()
+            .ok_or_else(|| {
+                EmbedStoreError::Runtime(format!("Failed downcasting {} column", column_name))
+            })
     }
 }

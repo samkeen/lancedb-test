@@ -26,7 +26,7 @@ async fn main() -> Result<(), lancedb::Error> {
     let text_lines = read_file_and_split_lines("tests/fixtures/mobi-dick.txt", 1000).unwrap();
     let alt_ids: Vec<String> = (1..=1000).map(|_| generate_id()).collect();
     let id = alt_ids[42].clone();
-    db.add(text_lines, alt_ids).await.unwrap();
+    db.add(alt_ids, text_lines).await.unwrap();
 
     db.create_index(None).await.unwrap();
 
