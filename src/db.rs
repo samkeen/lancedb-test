@@ -7,6 +7,7 @@ use arrow_schema::{ArrowError, DataType, Field, Schema};
 use fastembed::{Embedding, TextEmbedding};
 use futures::TryStreamExt;
 use lancedb::connection::Connection;
+use lancedb::index::Index;
 use lancedb::{connect, Table};
 use serde::Serialize;
 use std::error::Error;
@@ -241,13 +242,10 @@ impl EmbedStore {
     }
 
     /// Creates an index on a given field.
-    pub async fn create_index(&self, num_partitions: Option<u32>) -> Result<(), EmbedStoreError> {
-        let num_partitions = num_partitions.unwrap_or(8);
+    pub async fn create_index(&self) -> Result<(), EmbedStoreError> {
         self.table
-            .create_index(&[COLUMN_EMBEDDINGS])
-            .ivf_pq()
-            .num_partitions(num_partitions)
-            .build()
+            .create_index(&[COLUMN_EMBEDDINGS], Index::Auto)
+            .execute()
             .await
             .map_err(EmbedStoreError::from)
     }

@@ -28,7 +28,7 @@ async fn main() -> Result<(), lancedb::Error> {
     let id = alt_ids[42].clone();
     db.add(alt_ids, text_lines).await.unwrap();
 
-    db.create_index(None).await.unwrap();
+    db.create_index().await.unwrap();
 
     // FOUND example //////////
     let record = db.get(&id).await.unwrap();
