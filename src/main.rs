@@ -63,6 +63,7 @@ async fn main() -> Result<(), lancedb::Error> {
     let search_result = db
         .search(
             "Call me Ishmael. Some years ago—never mind how long precisely—having",
+            None,
             Some(3),
         )
         .await
