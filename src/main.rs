@@ -1,5 +1,6 @@
 mod db;
 
+use crate::db::Document;
 use db::EmbedStore;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lancedb::connect;
@@ -31,8 +32,8 @@ async fn main() -> Result<(), lancedb::Error> {
     db.create_index().await.unwrap();
 
     // FOUND example //////////
-    let record = db.get(&id).await.unwrap();
-    match record {
+    let found_record = db.get(&id).await.unwrap();
+    match found_record {
         None => {
             println!("The record with id: {id} was not found")
         }
@@ -40,6 +41,32 @@ async fn main() -> Result<(), lancedb::Error> {
             println!("Found record[{}]: '{:?}'", id, record.id)
         }
     }
+    // UPDATE example //////////
+    let mut record_to_update = db.get(&id).await.unwrap();
+    match record_to_update {
+        None => {
+            println!("The record with id: {id} was not found")
+        }
+        Some(orig_record) => {
+            println!("Updating record[{}]: '{:?}'", id, orig_record.id);
+            db.update(&orig_record.id, "New text").await.unwrap();
+            let updated_record = db.get(&id).await.unwrap();
+            match updated_record {
+                None => {}
+                Some(updated_record) => {
+                    assert_eq!("New text", updated_record.text);
+                    assert_eq!(orig_record.created, updated_record.created);
+                    assert!(
+                        orig_record.modified < updated_record.modified,
+                        "orig[{}], updated_record[{}]",
+                        orig_record.modified,
+                        updated_record.modified
+                    )
+                }
+            }
+        }
+    }
+
     // NOT FOUND example ////////
     let id = "abc";
     let record = db.get(id).await.unwrap();
@@ -70,8 +97,8 @@ async fn main() -> Result<(), lancedb::Error> {
         .unwrap();
     search_result.iter().for_each(|result| {
         println!(
-            "results: Document[{}] <distance:{}>: '{}'",
-            result.0.id, result.1, result.0.text
+            "results: Document[{}][{}] <distance:{}>: '{}'",
+            result.0.id, result.0.created, result.1, result.0.text
         );
     });
 

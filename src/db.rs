@@ -1,9 +1,11 @@
 use crate::db::EmbedStoreError::Runtime;
 use arrow_array::types::Float32Type;
 use arrow_array::{
-    ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, StringArray,
+    ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch, RecordBatchIterator,
+    StringArray,
 };
 use arrow_schema::{ArrowError, DataType, Field, Schema};
+use chrono::Utc;
 use fastembed::{Embedding, TextEmbedding};
 use futures::TryStreamExt;
 use lancedb::connection::Connection;
@@ -27,6 +29,8 @@ const COLUMN_TEXT: &str = "text";
 pub struct Document {
     pub id: String,
     pub text: String,
+    pub created: i64,
+    pub modified: i64,
 }
 
 impl PartialEq for Document {
@@ -113,9 +117,25 @@ impl EmbedStore {
             EMBEDDING_DIMENSIONS,
             "Embedding dimensions mismatch"
         );
+        let now = Utc::now().timestamp();
+        let created = vec![now; alt_ids.len()];
+        let modified = vec![now; alt_ids.len()];
+
+        self.add_records(alt_ids, text, embeddings, created, modified)
+            .await
+    }
+
+    async fn add_records(
+        &self,
+        alt_ids: Vec<String>,
+        text: Vec<String>,
+        embeddings: Vec<Embedding>,
+        created: Vec<i64>,
+        modified: Vec<i64>,
+    ) -> Result<(), EmbedStoreError> {
         let schema = self.table.schema().await?;
         let records_iter = self
-            .create_record_batch(embeddings, text, alt_ids, schema.clone())
+            .create_record_batch(embeddings, text, alt_ids, created, modified, schema.clone())
             .into_iter()
             .map(Ok);
 
@@ -243,8 +263,26 @@ impl EmbedStore {
     }
 
     pub async fn update(&self, id: &str, text: &str) -> Result<(), EmbedStoreError> {
-        self.delete(&vec![id]).await?;
-        self.add(vec![id.to_string()], vec![text.to_string()]).await
+        if let Some(doc) = self.get(id).await? {
+            let embeddings = self.create_embeddings(&[text.to_string()])?;
+            let now = Utc::now().timestamp();
+            let modified = vec![now];
+
+            self.delete(&vec![id]).await?;
+            self.add_records(
+                vec![id.to_string()],
+                vec![text.to_string()],
+                embeddings,
+                vec![doc.created],
+                modified,
+            )
+            .await
+        } else {
+            Err(EmbedStoreError::Runtime(format!(
+                "Document with ID '{}' not found",
+                id
+            )))
+        }
     }
 
     /// Creates an index on a given field.
@@ -268,12 +306,24 @@ impl EmbedStore {
             let ids = self.downcast_column::<StringArray>(&record_batch, "id")?;
             let texts = self.downcast_column::<StringArray>(&record_batch, "text")?;
             let distances = self.downcast_column::<Float32Array>(&record_batch, "_distance")?;
+            let created_values = self.downcast_column::<Int64Array>(&record_batch, "created")?;
+            let modified_values = self.downcast_column::<Int64Array>(&record_batch, "modified")?;
 
             (0..record_batch.num_rows()).for_each(|index| {
                 let id = ids.value(index).to_string();
                 let text = texts.value(index).to_string();
                 let distance = distances.value(index);
-                docs_with_distance.push((Document { id: id, text: text }, distance))
+                let created = created_values.value(index);
+                let modified = modified_values.value(index);
+                docs_with_distance.push((
+                    Document {
+                        id,
+                        text,
+                        created,
+                        modified,
+                    },
+                    distance,
+                ))
             });
         }
         log::info!(
@@ -295,11 +345,20 @@ impl EmbedStore {
         for record_batch in record_batches {
             let ids = self.downcast_column::<StringArray>(&record_batch, "id")?;
             let texts = self.downcast_column::<StringArray>(&record_batch, "text")?;
+            let created_values = self.downcast_column::<Int64Array>(&record_batch, "created")?;
+            let modified_values = self.downcast_column::<Int64Array>(&record_batch, "modified")?;
 
             (0..record_batch.num_rows()).for_each(|index| {
                 let id = ids.value(index).to_string();
                 let text = texts.value(index).to_string();
-                documents.push(Document { id: id, text: text })
+                let created = created_values.value(index);
+                let modified = modified_values.value(index);
+                documents.push(Document {
+                    id,
+                    text,
+                    created,
+                    modified,
+                });
             });
         }
         log::info!("Converted [{}] batch results to Documents", documents.len());
@@ -354,6 +413,8 @@ impl EmbedStore {
         embeddings: Vec<Vec<f32>>,
         text: Vec<String>,
         alt_ids: Vec<String>,
+        created: Vec<i64>,
+        modified: Vec<i64>,
         schema: Arc<Schema>,
     ) -> Vec<RecordBatch> {
         let dimensions_count = embeddings[0].len();
@@ -374,6 +435,8 @@ impl EmbedStore {
                 Arc::new(Arc::new(StringArray::from(text)) as ArrayRef),
                 // Alt Id
                 Arc::new(Arc::new(StringArray::from(alt_ids)) as ArrayRef),
+                Arc::new(Arc::new(Int64Array::from(created)) as ArrayRef),
+                Arc::new(Arc::new(Int64Array::from(modified)) as ArrayRef),
             ],
         );
         match record_batch {
@@ -398,6 +461,8 @@ impl EmbedStore {
             ),
             Field::new(COLUMN_TEXT, DataType::Utf8, false),
             Field::new(COLUMN_ID, DataType::Utf8, false),
+            Field::new("created", DataType::Int64, false),
+            Field::new("modified", DataType::Int64, false),
         ]))
     }
 
