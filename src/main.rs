@@ -5,7 +5,6 @@ use db::EmbedStore;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lancedb::connect;
 use lancedb::connection::Connection;
-use rand::distributions::Alphanumeric;
 use rand::Rng;
 use std::path::Path;
 use std::{fs, io};
@@ -13,7 +12,7 @@ use std::{fs, io};
 #[tokio::main]
 async fn main() -> Result<(), lancedb::Error> {
     // RESET THE DB FOR TESTING
-    reset_db().await.expect("Unable to reset db");
+    reset_db().await.unwrap();
 
     let embedding_model = TextEmbedding::try_new(InitOptions {
         model_name: EmbeddingModel::AllMiniLML6V2,
@@ -24,12 +23,24 @@ async fn main() -> Result<(), lancedb::Error> {
 
     let db = EmbedStore::new(embedding_model).await.unwrap();
 
-    let text_lines = read_file_and_split_lines("tests/fixtures/mobi-dick.txt", 1000).unwrap();
-    let alt_ids: Vec<String> = (1..=1000).map(|_| generate_id()).collect();
-    let id = alt_ids[42].clone();
-    db.add(alt_ids, text_lines).await.unwrap();
+    // Read text lines from file
+    let text_lines = read_file_lines("tests/fixtures/mobi-dick.txt", 1000).unwrap();
+
+    // Create documents
+    let documents: Vec<Document> = text_lines
+        .into_iter()
+        .map(|line| Document::new(&line))
+        .collect();
+
+    db.add(documents.clone()).await.unwrap();
 
     db.create_index().await.unwrap();
+
+    let id = documents
+        .first()
+        .expect("The documents vector is empty")
+        .id
+        .clone();
 
     // FOUND example //////////
     let found_record = db.get(&id).await.unwrap();
@@ -41,6 +52,7 @@ async fn main() -> Result<(), lancedb::Error> {
             println!("Found record[{}]: '{:?}'", id, record.id)
         }
     }
+
     // UPDATE example //////////
     let mut record_to_update = db.get(&id).await.unwrap();
     match record_to_update {
@@ -49,7 +61,13 @@ async fn main() -> Result<(), lancedb::Error> {
         }
         Some(orig_record) => {
             println!("Updating record[{}]: '{:?}'", id, orig_record.id);
-            db.update(&orig_record.id, "New text").await.unwrap();
+            let updated_document = Document {
+                id: orig_record.id,
+                text: "New text".to_string(),
+                created: orig_record.created,
+                modified: orig_record.modified,
+            };
+            db.update(vec![updated_document]).await.unwrap();
             let updated_record = db.get(&id).await.unwrap();
             match updated_record {
                 None => {}
@@ -79,9 +97,6 @@ async fn main() -> Result<(), lancedb::Error> {
         }
     }
 
-    // update record 42
-    // db.update()
-
     let record_count = db.record_count().await.unwrap();
     println!("Number of items in Db: {record_count}");
 
@@ -105,16 +120,6 @@ async fn main() -> Result<(), lancedb::Error> {
     Ok(())
 }
 
-fn generate_id() -> String {
-    let mut rng = rand::thread_rng();
-    let id: String = std::iter::repeat(())
-        .map(|()| rng.sample(Alphanumeric))
-        .map(char::from)
-        .take(6)
-        .collect();
-    id
-}
-
 /// Initializes the database.
 async fn reset_db() -> lancedb::Result<Connection> {
     if Path::new("data").exists() {
@@ -124,8 +129,7 @@ async fn reset_db() -> lancedb::Result<Connection> {
     Ok(db)
 }
 
-/// Reads a file and splits its content into lines.
-fn read_file_and_split_lines<P: AsRef<Path>>(path: P, limit: usize) -> io::Result<Vec<String>> {
+fn read_file_lines(path: &str, limit: usize) -> std::io::Result<Vec<String>> {
     let content = fs::read_to_string(path)?;
     let lines: Vec<String> = content
         .lines()
