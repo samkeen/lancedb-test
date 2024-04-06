@@ -6,7 +6,7 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lancedb::connect;
 use lancedb::connection::Connection;
 use rand::Rng;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 #[tokio::main]
@@ -21,7 +21,9 @@ async fn main() -> Result<(), lancedb::Error> {
     })
     .unwrap();
 
-    let db = EmbedStore::new(embedding_model).await.unwrap();
+    let db = EmbedStore::new(embedding_model, &PathBuf::from("./data"))
+        .await
+        .unwrap();
 
     // Read text lines from file
     let text_lines = read_file_lines("tests/fixtures/mobi-dick.txt", 1000).unwrap();
