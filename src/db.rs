@@ -198,7 +198,6 @@ impl EmbedStore {
         filter: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<(Document, f32)>, EmbedStoreError> {
-        let limit = limit.unwrap_or(25);
         let query = self.create_embeddings(&[search_text.to_string()])?;
         // flattening a 2D vector into a 1D vector. This is necessary because the search
         // function of the Table trait expects a 1D vector as input. However, the
@@ -208,7 +207,7 @@ impl EmbedStore {
             .into_iter()
             .flat_map(|embedding| embedding.to_vec())
             .collect();
-        self.execute_search(query, filter, Some(limit)).await
+        self.execute_search(query, filter, limit).await
     }
 
     async fn execute_search(
@@ -217,14 +216,16 @@ impl EmbedStore {
         filter: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<(Document, f32)>, EmbedStoreError> {
-        let limit = limit.unwrap_or(10);
+        // let limit = limit.unwrap_or(25);
         let mut query_builder = self
             .table
             .vector_search(query)
-            .map_err(EmbedStoreError::VectorDb)?
-            .limit(limit);
+            .map_err(EmbedStoreError::VectorDb)?;
         if let Some(filter_clause) = filter {
             query_builder = query_builder.only_if(filter_clause);
+        }
+        if let Some(limit_clause) = limit {
+            query_builder = query_builder.limit(limit_clause);
         }
 
         let stream = query_builder.execute().await?;
@@ -246,11 +247,12 @@ impl EmbedStore {
         filter: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<Document>, EmbedStoreError> {
-        let limit = limit.unwrap_or(10);
-
-        let mut query_builder = self.table.query().limit(limit);
+        let mut query_builder = self.table.query();
         if let Some(filter_clause) = filter {
             query_builder = query_builder.only_if(filter_clause);
+        }
+        if let Some(limit_clause) = limit {
+            query_builder = query_builder.limit(limit_clause);
         }
 
         let stream = query_builder.execute().await?;
@@ -280,7 +282,7 @@ impl EmbedStore {
 
     pub async fn get_all(&self) -> Result<(Vec<Document>, usize), EmbedStoreError> {
         let total_records = self.record_count().await?;
-        let documents = self.execute_query(None, Some(1000)).await?;
+        let documents = self.execute_query(None, None).await?;
         log::info!(
             "get_all returned {} records. Total rows in db: {}",
             documents.len(),

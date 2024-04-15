@@ -108,7 +108,7 @@ async fn main() -> Result<(), lancedb::Error> {
         .search(
             "Call me Ishmael. Some years ago—never mind how long precisely—having",
             None,
-            Some(3),
+            Some(4),
         )
         .await
         .unwrap();
