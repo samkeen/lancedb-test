@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 log = "0.4.20"
 env_logger = "0.11.2"
-lancedb = "0.4.13"
+lancedb = "0.4.17"
 tokio = "1.36.0"
 futures = "0.3.30"
 arrow-array = "50.0.0"
