@@ -36,6 +36,14 @@ pub struct Document {
     pub modified: i64,
 }
 
+pub trait DocumentTrait {
+    fn get_id(&self) -> &str;
+    fn get_text(&self) -> &str;
+    fn get_created(&self) -> i64;
+    fn get_modified(&self) -> i64;
+    fn get_fields(&self) -> Vec<ArrayRef>;
+}
+
 impl Document {
     pub fn new(text: &str) -> Self {
         let now = Utc::now().timestamp();
@@ -45,16 +53,6 @@ impl Document {
             created: now,
             modified: now,
         }
-    }
-
-    /// Returns the id of the Note.
-    pub fn get_id(&self) -> &str {
-        &self.id
-    }
-
-    /// Returns the content of the Note.
-    pub fn get_content(&self) -> &str {
-        &self.text
     }
 
     /// Generates a random id for a Document.
@@ -67,6 +65,33 @@ impl Document {
             .take(6)
             .collect();
         id
+    }
+}
+
+impl DocumentTrait for Document {
+    fn get_id(&self) -> &str {
+        &self.id
+    }
+
+    fn get_text(&self) -> &str {
+        &self.text
+    }
+
+    fn get_created(&self) -> i64 {
+        self.created
+    }
+
+    fn get_modified(&self) -> i64 {
+        self.modified
+    }
+
+    fn get_fields(&self) -> Vec<ArrayRef> {
+        vec![
+            Arc::new(StringArray::from(vec![self.text.clone()])),
+            Arc::new(StringArray::from(vec![self.id.clone()])),
+            Arc::new(Int64Array::from(vec![self.created])),
+            Arc::new(Int64Array::from(vec![self.modified])),
+        ]
     }
 }
 
@@ -145,11 +170,15 @@ impl EmbedStore {
         })
     }
 
-    pub async fn add(&self, documents: Vec<Document>) -> Result<(), EmbedStoreError> {
-        let alt_ids: Vec<String> = documents.iter().map(|doc| doc.id.clone()).collect();
-        let text: Vec<String> = documents.iter().map(|doc| doc.text.clone()).collect();
-        let created: Vec<i64> = documents.iter().map(|doc| doc.created).collect();
-        let modified: Vec<i64> = documents.iter().map(|doc| doc.modified).collect();
+    pub async fn add<D: DocumentTrait>(&self, documents: Vec<D>) -> Result<(), EmbedStoreError> {
+        let alt_ids: Vec<String> = documents
+            .iter()
+            .map(|doc| doc.get_id().to_string())
+            .collect();
+        let text: Vec<String> = documents
+            .iter()
+            .map(|doc| doc.get_text().to_string())
+            .collect();
 
         log::info!("Saving Documents: {:?}", alt_ids);
         let embeddings = self.create_embeddings(&text)?;
@@ -159,21 +188,17 @@ impl EmbedStore {
             "Embedding dimensions mismatch"
         );
 
-        self.add_records(alt_ids, text, embeddings, created, modified)
-            .await
+        self.add_records(embeddings, documents).await
     }
 
-    async fn add_records(
+    async fn add_records<D: DocumentTrait>(
         &self,
-        alt_ids: Vec<String>,
-        text: Vec<String>,
         embeddings: Vec<Embedding>,
-        created: Vec<i64>,
-        modified: Vec<i64>,
+        documents: Vec<D>,
     ) -> Result<(), EmbedStoreError> {
         let schema = self.table.schema().await?;
         let records_iter = self
-            .create_record_batch(embeddings, text, alt_ids, created, modified, schema.clone())
+            .create_record_batch(embeddings, &documents, schema.clone())
             .into_iter()
             .map(Ok);
 
@@ -440,44 +465,51 @@ impl EmbedStore {
     }
 
     /// Creates a record batch from a list of embeddings and a correlated list of original text.
-    fn create_record_batch(
+    fn create_record_batch<D: DocumentTrait>(
         &self,
         embeddings: Vec<Vec<f32>>,
-        text: Vec<String>,
-        alt_ids: Vec<String>,
-        created: Vec<i64>,
-        modified: Vec<i64>,
+        documents: &[D],
         schema: Arc<Schema>,
     ) -> Vec<RecordBatch> {
         let dimensions_count = embeddings[0].len();
         let wrapped_source = self.wrap_in_option(embeddings);
-        let record_batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                // id field
-                // Arc::new(Int32Array::from_iter_values(0..total_records_count as i32)),
-                // Embeddings field
-                Arc::new(
-                    FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-                        wrapped_source,
-                        dimensions_count as i32,
-                    ),
-                ),
-                // Text field
-                Arc::new(Arc::new(StringArray::from(text)) as ArrayRef),
-                // Alt Id
-                Arc::new(Arc::new(StringArray::from(alt_ids)) as ArrayRef),
-                Arc::new(Arc::new(Int64Array::from(created)) as ArrayRef),
-                Arc::new(Arc::new(Int64Array::from(modified)) as ArrayRef),
-            ],
-        );
+        let mut columns: Vec<ArrayRef> = Vec::new();
+        // Add the embeddings column
+        columns.push(Arc::new(FixedSizeListArray::from_iter_primitive::<
+            Float32Type,
+            _,
+            _,
+        >(wrapped_source, dimensions_count as i32)));
+
+        // let alt_ids: Vec<String> = documents.iter().map(|doc| doc.id.clone()).collect();
+        // let text: Vec<String> = documents.iter().map(|doc| doc.text.clone()).collect();
+        // let created: Vec<i64> = documents.iter().map(|doc| doc.created).collect();
+        // let modified: Vec<i64> = documents.iter().map(|doc| doc.modified).collect();
+
+        // Arc::new(StringArray::from(vec![self.text.clone()]))
+
+        // Arc::new(Arc::new(StringArray::from(alt_ids)) as ArrayRef),
+
+        match documents.first() {
+            None => return Vec::new(),
+            Some(first_doc) => {
+                for field in first_doc.get_fields() {
+                    columns.push(field)
+                }
+            }
+        };
+
+        // Add columns for each field
+        for doc in documents {
+            let fields = doc.get_fields();
+            columns.extend(fields);
+        }
+
+        let record_batch = RecordBatch::try_new(schema.clone(), columns);
+
         match record_batch {
-            Ok(batch) => {
-                vec![batch]
-            }
-            Err(e) => {
-                panic!("Was unable to create a record batch: {}", e)
-            }
+            Ok(batch) => vec![batch],
+            Err(e) => panic!("Was unable to create a record batch: {}", e),
         }
     }
 
