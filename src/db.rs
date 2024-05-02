@@ -1,4 +1,9 @@
-use crate::db::EmbedStoreError::Runtime;
+use std::error::Error;
+use std::fmt;
+use std::fmt::Formatter;
+use std::path::Path;
+use std::sync::Arc;
+
 use arrow_array::types::Float32Type;
 use arrow_array::{
     ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch, RecordBatchIterator,
@@ -15,11 +20,7 @@ use lancedb::{connect, Table};
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use serde::Serialize;
-use std::error::Error;
-use std::fmt;
-use std::fmt::Formatter;
-use std::path::Path;
-use std::sync::Arc;
+use thiserror::Error;
 
 const DB_NAME: &str = "sample-lancedb";
 const TABLE_NAME: &str = "documents";
@@ -82,52 +83,49 @@ pub struct EmbedStore {
     table: Table,
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum EmbedStoreError {
-    VectorDb(lancedb::error::Error),
-    Arrow(ArrowError),
-    Embedding(anyhow::Error),
+    #[error("Vector database error: {0}")]
+    VectorDb(#[from] lancedb::error::Error),
+
+    #[error("Arrow error: {0}")]
+    Arrow(#[from] ArrowError),
+
+    #[error("Embedding error: {0}")]
+    Embedding(#[from] anyhow::Error),
+
+    #[error("Runtime error: {0}")]
     Runtime(String),
 }
 
-impl fmt::Display for EmbedStoreError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+impl Serialize for EmbedStoreError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         match self {
-            EmbedStoreError::VectorDb(e) => write!(f, "{}", e),
-            EmbedStoreError::Arrow(e) => write!(f, "{}", e),
-            EmbedStoreError::Embedding(e) => write!(f, "{}", e),
-            Runtime(e) => write!(f, "{}", e),
+            EmbedStoreError::VectorDb(err) => serializer.serialize_newtype_variant(
+                "EmbedStoreError",
+                0,
+                "VectorDb",
+                &err.to_string(),
+            ),
+            EmbedStoreError::Arrow(err) => serializer.serialize_newtype_variant(
+                "EmbedStoreError",
+                1,
+                "Arrow",
+                &err.to_string(),
+            ),
+            EmbedStoreError::Embedding(err) => serializer.serialize_newtype_variant(
+                "EmbedStoreError",
+                2,
+                "Embedding",
+                &err.to_string(),
+            ),
+            EmbedStoreError::Runtime(err) => {
+                serializer.serialize_newtype_variant("EmbedStoreError", 3, "Runtime", err)
+            }
         }
-    }
-}
-
-impl Error for EmbedStoreError {
-    // Implement this to return the lower level source of this Error.
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            EmbedStoreError::VectorDb(e) => Some(e),
-            EmbedStoreError::Arrow(e) => Some(e),
-            EmbedStoreError::Embedding(_) => None,
-            Runtime(_) => None,
-        }
-    }
-}
-
-impl From<lancedb::error::Error> for EmbedStoreError {
-    fn from(e: lancedb::error::Error) -> Self {
-        EmbedStoreError::VectorDb(e)
-    }
-}
-
-impl From<ArrowError> for EmbedStoreError {
-    fn from(e: ArrowError) -> Self {
-        EmbedStoreError::Arrow(e)
-    }
-}
-
-impl From<anyhow::Error> for EmbedStoreError {
-    fn from(e: anyhow::Error) -> Self {
-        EmbedStoreError::Embedding(e)
     }
 }
 
@@ -269,7 +267,6 @@ impl EmbedStore {
         let documents = self.record_to_document(record_batches)?;
         Ok(documents)
     }
-
     pub async fn get(&self, id: &str) -> Result<Option<Document>, EmbedStoreError> {
         let filter = format!("id = '{}'", id);
         let mut result = self.execute_query(Some(&filter), None).await?;
@@ -288,6 +285,7 @@ impl EmbedStore {
             documents.len(),
             total_records
         );
+
         Ok((documents, total_records))
     }
 
@@ -397,9 +395,10 @@ impl EmbedStore {
         let db_path = data_dir.join(DB_NAME);
         log::info!("Connecting to db at path: '{:?}'", db_path);
         match db_path.to_str() {
-            None => Err(Runtime(
-                format!("Failed to convert db_path: {:?} to string", db_path).to_string(),
-            )),
+            None => Err(EmbedStoreError::Runtime(format!(
+                "Failed to convert db_path: {:?} to string",
+                db_path
+            ))),
             Some(path) => Ok(connect(path).execute().await?),
         }
     }

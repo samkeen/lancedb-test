@@ -18,3 +18,4 @@ anyhow = "1.0.79"
 rand = "0.8.5"
 serde = { version = "1.0.196", features = ["derive"] }
 chrono = "0.4.37"
+thiserror = "1.0.59"
