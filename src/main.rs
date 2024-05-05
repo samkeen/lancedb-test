@@ -1,6 +1,6 @@
 mod db;
 
-use crate::db::Document;
+use crate::db::{Document, Documentable};
 use db::EmbedStore;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use lancedb::connect;
@@ -41,46 +41,46 @@ async fn main() -> Result<(), lancedb::Error> {
     let id = documents
         .first()
         .expect("The documents vector is empty")
-        .id
+        .id()
         .clone();
 
     // FOUND example //////////
-    let found_record = db.get(&id).await.unwrap();
+    let found_record = db.get::<Document>(&id).await.unwrap();
     match found_record {
         None => {
             println!("The record with id: {id} was not found")
         }
         Some(record) => {
-            println!("Found record[{}]: '{:?}'", id, record.id)
+            println!("Found record[{}]: '{:?}'", id, record.id())
         }
     }
 
     // UPDATE example //////////
-    let mut record_to_update = db.get(&id).await.unwrap();
+    let mut record_to_update = db.get::<Document>(&id).await.unwrap();
     match record_to_update {
         None => {
             println!("The record with id: {id} was not found")
         }
         Some(orig_record) => {
-            println!("Updating record[{}]: '{:?}'", id, orig_record.id);
-            let updated_document = Document {
-                id: orig_record.id,
-                text: "New text".to_string(),
-                created: orig_record.created,
-                modified: orig_record.modified,
-            };
+            println!("Updating record[{}]: '{:?}'", id, orig_record.id());
+            let mut updated_document = Document::default();
+            updated_document.set_id(orig_record.id().to_string());
+            updated_document.set_text("New text".to_string());
+            updated_document.set_created(orig_record.created());
+            updated_document.set_modified(orig_record.modified());
+
             db.update(vec![updated_document]).await.unwrap();
-            let updated_record = db.get(&id).await.unwrap();
+            let updated_record = db.get::<Document>(&id).await.unwrap();
             match updated_record {
                 None => {}
                 Some(updated_record) => {
-                    assert_eq!("New text", updated_record.text);
-                    assert_eq!(orig_record.created, updated_record.created);
+                    assert_eq!("New text", updated_record.text());
+                    assert_eq!(orig_record.created(), updated_record.created());
                     assert!(
-                        orig_record.modified < updated_record.modified,
+                        orig_record.modified() < updated_record.modified(),
                         "orig[{}], updated_record[{}]",
-                        orig_record.modified,
-                        updated_record.modified
+                        orig_record.modified(),
+                        updated_record.modified()
                     )
                 }
             }
@@ -89,13 +89,13 @@ async fn main() -> Result<(), lancedb::Error> {
 
     // NOT FOUND example ////////
     let id = "abc";
-    let record = db.get(id).await.unwrap();
+    let record = db.get::<Document>(id).await.unwrap();
     match record {
         None => {
             println!("The record with id: {id} was not found")
         }
         Some(record) => {
-            println!("Found record[{}]: '{:?}'", id, record.id)
+            println!("Found record[{}]: '{:?}'", id, record.id())
         }
     }
 
@@ -105,7 +105,7 @@ async fn main() -> Result<(), lancedb::Error> {
     // Search example /////////
     println!("Starting search...");
     let search_result = db
-        .search(
+        .search::<Document>(
             "Call me Ishmael. Some years ago—never mind how long precisely—having",
             None,
             Some(4),
@@ -115,7 +115,10 @@ async fn main() -> Result<(), lancedb::Error> {
     search_result.iter().for_each(|result| {
         println!(
             "results: Document[{}][{}] <distance:{}>: '{}'",
-            result.0.id, result.0.created, result.1, result.0.text
+            result.0.id(),
+            result.0.created(),
+            result.1,
+            result.0.text()
         );
     });
 
